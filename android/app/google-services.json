@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "243913496121",
+    "project_id": "real-estate-map-fb636",
+    "storage_bucket": "real-estate-map-fb636.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:243913496121:android:900447d46ae13d984e5fe8",
+        "android_client_info": {
+          "package_name": "com.example.real_estate_map_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDyROQh1r8WqaFyu00yJCIWcbEfTpmTaZ8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

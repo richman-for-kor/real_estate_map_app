@@ -1,0 +1,93 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │  [보안 / QA] 위치 권한                                                    │
+    │  ACCESS_FINE_LOCATION  : GPS 정밀 위치 (네이버 지도 내 위치 표시)           │
+    │  ACCESS_COARSE_LOCATION: Wi-Fi·셀 기반 대략적 위치 (배터리 절약 fallback)   │
+    │  스토어 정책: 앱 기능(지도 내 위치) 설명을 반드시 포함해야 합니다.              │
+    └─────────────────────────────────────────────────────────────────────────┘
+    -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- 네이버 지도 타일 로드 및 Firebase 네트워크 통신 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │  [보안 / QA] 임장 기록 — 카메라 및 갤러리 권한                              │
+    │  CAMERA              : 현장 사진·동영상 촬영                                │
+    │  READ_EXTERNAL_STORAGE: Android ≤12 (API 32) 갤러리 읽기                   │
+    │  READ_MEDIA_IMAGES   : Android 13+ (API 33) 이미지 읽기                    │
+    │  READ_MEDIA_VIDEO    : Android 13+ (API 33) 동영상 읽기                    │
+    │  스토어 정책: 앱 기능(임장 기록 첨부) 설명을 반드시 포함해야 합니다.            │
+    └──────────────────────────────────────────────────────────────────────────┘
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+
+    <application
+        android:label="집로그"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
+        <!--
+        ┌──────────────────────────────────────────────────────────────────────┐
+        │  [CTO] 네이버 지도 Client ID                                           │
+        │  네이버 클라우드 플랫폼 콘솔 → Application → Mobile Dynamic Map 앱에서  │
+        │  발급받은 Client ID를 아래 android:value 에 입력하세요.                  │
+        │  https://console.ncloud.com/naver-service/application                │
+        └──────────────────────────────────────────────────────────────────────┘
+        -->
+        <meta-data
+            android:name="com.naver.maps.map.NCP_KEY_ID"
+            android:value="r8mj4hyeaa" />
+    </application>
+
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- url_launcher: Android 11+ 에서 브라우저로 http/https URL을 열기 위해 필요 -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="http"/>
+        </intent>
+    </queries>
+</manifest>
