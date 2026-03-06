@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
@@ -31,7 +32,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 // ─── 카카오 로컬 API (키워드 장소 검색) 설정 ───────────────────────────────────
 // ⚠️  아래 키를 카카오 디벨로퍼스(developers.kakao.com)에서 발급받은
 //     [REST API 키]로 교체한 뒤 flutter run 하세요.
-const _kKakaoRestApiKey = '58af62d9bd084e0ba7c2fa105414160c';
 const _kKakaoSearchUrl = 'https://dapi.kakao.com/v2/local/search/keyword.json';
 
 // ─── 색상 상수 ─────────────────────────────────────────────────────────────────
@@ -425,7 +425,9 @@ class _MapScreenState extends State<MapScreen> {
       );
       final res = await http.get(
         uri,
-        headers: {'Authorization': 'KakaoAK $_kKakaoRestApiKey'},
+        headers: {
+          'Authorization': 'KakaoAK ${dotenv.env['KAKAO_REST_API_KEY']}',
+        },
       );
 
       if (!mounted) return;
