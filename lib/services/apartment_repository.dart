@@ -121,8 +121,17 @@ class ApartmentRepository {
       final snap = await _col.where('bjdCode', isEqualTo: bjdCode).get();
 
       if (snap.docs.isNotEmpty) {
-        debugPrint('[AptRepo] ✅ Cache HIT — ${snap.docs.length}개 단지');
-        return snap.docs.map((d) => ApartmentInfo.fromFirestore(d)).toList();
+        // TTL 검사: 첫 번째 문서의 cachedAt이 7일 이상 지났으면 Stale로 간주
+        final cachedAt =
+            snap.docs.first.data()['cachedAt'] as Timestamp?;
+        final isStale = cachedAt == null ||
+            DateTime.now().difference(cachedAt.toDate()).inDays >= 7;
+
+        if (!isStale) {
+          debugPrint('[AptRepo] ✅ Cache HIT — ${snap.docs.length}개 단지');
+          return snap.docs.map((d) => ApartmentInfo.fromFirestore(d)).toList();
+        }
+        debugPrint('[AptRepo] ⚠️ Cache STALE — TTL 초과, 재호출');
       }
     } catch (e) {
       // Firestore 읽기 실패 → Cache Miss로 진행

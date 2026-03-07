@@ -15,6 +15,7 @@ import '../widgets/image_viewer_popup.dart';
 import 'edit_profile_screen.dart';
 import 'favorite_list_screen.dart';
 import 'login_screen.dart';
+import 'settings_screen.dart';
 
 /// 내 정보 탭 화면.
 ///
@@ -335,7 +336,10 @@ class _ProfileViewState extends State<_ProfileView> {
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: '설정',
-            onPressed: () {},
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            ),
           ),
         ],
       ),

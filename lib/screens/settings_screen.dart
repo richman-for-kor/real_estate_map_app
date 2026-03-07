@@ -504,7 +504,7 @@ class _SwitchTile extends StatelessWidget {
           Switch(
             value: value,
             onChanged: onChanged,
-            activeColor: kPrimary,
+            activeThumbColor: kPrimary,
           ),
         ],
       ),
@@ -570,7 +570,7 @@ class _NavTile extends StatelessWidget {
                 ],
               ),
             ),
-            if (trailing != null) trailing!,
+            ?trailing,
             if (showChevron)
               Icon(
                 Icons.chevron_right_rounded,

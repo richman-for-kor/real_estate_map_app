@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -232,114 +231,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     }
   }
 
-  /// 회원 탈퇴 확인 팝업 → 탈퇴 처리.
-  ///
-  /// [보안] `currentUser.delete()`는 최근 인증이 필요합니다.
-  /// 이메일 유저는 이미 `_reauthenticate()`를 통과했으므로 안전합니다.
-  Future<void> _showDeleteAccountDialog() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(Icons.warning_amber_rounded, color: Colors.red.shade600, size: 24),
-            const SizedBox(width: 8),
-            const Text('회원 탈퇴'),
-          ],
-        ),
-        content: const Text(
-          '정말로 탈퇴하시겠습니까?\n모든 데이터가 삭제됩니다.',
-          style: TextStyle(fontSize: 14, height: 1.65),
-        ),
-        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        actions: [
-          OutlinedButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            style: OutlinedButton.styleFrom(
-              minimumSize: const Size(72, 44),
-              side: const BorderSide(color: kBorderColor, width: 1.5),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10)),
-            ),
-            child: const Text('취소'),
-          ),
-          const SizedBox(width: 8),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: ElevatedButton.styleFrom(
-              minimumSize: const Size(88, 44),
-              backgroundColor: Colors.red.shade700,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10)),
-            ),
-            child: const Text('탈퇴하기'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true || !mounted) return;
-
-    setState(() => _isLoading = true);
-    try {
-      await _user!.delete();
-      if (mounted) {
-        // 모든 스택 제거 후 루트(MainTabScreen) 복귀.
-        // MyPageScreen의 authStateChanges가 null을 emit하여 _GuestView로 자동 전환됩니다.
-        Navigator.of(context).popUntil((route) => route.isFirst);
-      }
-    } on FirebaseAuthException catch (e) {
-      if (e.code == 'requires-recent-login' && !_isEmailProvider) {
-        // Google 유저: 로그인 경과 시간이 길면 requires-recent-login 발생.
-        // 팝업 재인증 후 삭제를 재시도합니다.
-        final success = await _reauthGoogleAndRetryDelete();
-        if (!success && mounted) {
-          setState(() => _isLoading = false);
-          _showSnackBar('재인증에 실패했습니다. 다시 시도해 주세요.');
-        }
-      } else {
-        if (mounted) {
-          setState(() => _isLoading = false);
-          _showSnackBar(_parseAuthError(e));
-        }
-      }
-    }
-  }
-
-  /// Google 유저 재인증 후 계정 삭제 재시도.
-  ///
-  /// [흐름] GoogleSignIn.instance.authenticate() 팝업 → idToken 취득
-  ///        → reauthenticateWithCredential() → delete() → 루트로 복귀
-  /// [v7 호환] accessToken 없이 idToken만 사용 (google_sign_in v7 스펙).
-  Future<bool> _reauthGoogleAndRetryDelete() async {
-    try {
-      // google_sign_in v7 싱글톤 — serverClientId는 main.dart initialize() 완료 상태
-      final googleUser = await GoogleSignIn.instance.authenticate();
-      final googleAuth = googleUser.authentication;
-      final credential = GoogleAuthProvider.credential(
-        idToken: googleAuth.idToken,
-      );
-
-      await _user!.reauthenticateWithCredential(credential);
-      await _user!.delete();
-
-      if (mounted) {
-        Navigator.of(context).popUntil((route) => route.isFirst);
-      }
-      return true;
-    } on GoogleSignInException catch (e) {
-      // 사용자가 직접 취소한 경우 조용히 실패
-      if (e.code == GoogleSignInExceptionCode.canceled) return false;
-      debugPrint('[EditProfile] Google 재인증 실패: ${e.description}');
-      return false;
-    } catch (e) {
-      debugPrint('[EditProfile] 계정 삭제 재시도 실패: $e');
-      return false;
-    }
-  }
-
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   void _showSnackBar(String msg, {bool isError = true}) {
@@ -551,26 +442,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
             child: const Text('저장하기'),
           ),
 
-          // ── 회원 탈퇴 (눈에 잘 안 띄게) ──────────────────────────────────────
-          // [PM/UX] 탈퇴는 의도치 않게 누르기 어렵도록 화면 최하단, 작은 글씨로 배치합니다.
-          const SizedBox(height: 56),
-          Center(
-            child: TextButton(
-              onPressed: _isLoading ? null : _showDeleteAccountDialog,
-              style: TextButton.styleFrom(
-                foregroundColor: Colors.grey.shade400,
-                minimumSize: Size.zero,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                textStyle: const TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w400,
-                  decoration: TextDecoration.underline,
-                ),
-              ),
-              child: const Text('회원 탈퇴'),
-            ),
-          ),
           const SizedBox(height: 16),
         ],
       ),

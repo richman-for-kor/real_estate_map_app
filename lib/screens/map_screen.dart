@@ -149,6 +149,8 @@ class _MapScreenState extends State<MapScreen> {
   bool _isLocationLoading = false;
   bool _isMarkersLoading = false; // 아파트 마커 데이터 로딩 중 여부
 
+  String? _currentBjdCode; // 현재 카메라 중심의 법정동 코드
+
   NMarker? _searchMarker;
   final List<NMarker> _aptMarkers = [];
 
@@ -197,6 +199,7 @@ class _MapScreenState extends State<MapScreen> {
               options: _kMapOptions,
               onMapReady: _onMapReady,
               onMapTapped: _onMapTapped,
+              onCameraIdle: _onCameraIdle,
             ),
           ),
 
@@ -275,7 +278,48 @@ class _MapScreenState extends State<MapScreen> {
   void _onMapReady(NaverMapController controller) {
     _mapController = controller;
     _tryActivateLocationIfGranted();
+    _currentBjdCode = _kInitialBjdCode;
     _renderAptMarkers(_kInitialBjdCode);
+  }
+
+  Future<void> _onCameraIdle(NCameraPosition position) async {
+    final lat = position.target.latitude;
+    final lng = position.target.longitude;
+    final bjdCode = await _getBjdCodeFromCoords(lat, lng);
+    if (bjdCode == null || bjdCode == _currentBjdCode) return;
+    _currentBjdCode = bjdCode;
+    _renderAptMarkers(bjdCode);
+  }
+
+  // ── 카카오 로컬 API — 역지오코딩 (좌표 → 법정동 코드) ─────────────────────────
+  Future<String?> _getBjdCodeFromCoords(double lat, double lng) async {
+    try {
+      final uri = Uri.parse(
+        'https://dapi.kakao.com/v2/local/geo/coord2regioncode.json'
+        '?x=$lng&y=$lat',
+      );
+      final res = await http.get(
+        uri,
+        headers: {
+          'Authorization': 'KakaoAK ${dotenv.env['KAKAO_REST_API_KEY']}',
+        },
+      );
+      if (res.statusCode != 200) {
+        debugPrint('[Kakao Geo Error ${res.statusCode}] ${res.body}');
+        return null;
+      }
+      final documents =
+          (jsonDecode(res.body) as Map<String, dynamic>)['documents']
+              as List<dynamic>;
+      final bjd = documents.firstWhere(
+        (d) => d['region_type'] == 'B',
+        orElse: () => null,
+      );
+      return bjd?['code'] as String?;
+    } catch (e) {
+      debugPrint('[Kakao Geo Exception] $e');
+      return null;
+    }
   }
 
   Future<void> _tryActivateLocationIfGranted() async {
@@ -296,7 +340,7 @@ class _MapScreenState extends State<MapScreen> {
       return await NOverlayImage.fromWidget(
         context: context,
         size: const Size(72, 52),
-        widget: const _AptPriceBubble(priceLabel: '', areaLabel: ''),
+        widget: _AptPriceBubble(priceLabel: apt.kaptName, areaLabel: ''),
       );
     } catch (e) {
       debugPrint('[MapScreen] 마커 아이콘 생성 실패 (${apt.kaptName}): $e');
@@ -445,6 +489,13 @@ class _MapScreenState extends State<MapScreen> {
           _searchResults = [];
           _showDropdown = false;
         });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('검색 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.'),
+            ),
+          );
+        }
       }
     } catch (e) {
       debugPrint('[Kakao API Exception] $e');
@@ -453,6 +504,11 @@ class _MapScreenState extends State<MapScreen> {
           _searchResults = [];
           _showDropdown = false;
         });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('검색 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.'),
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _isSearching = false);
