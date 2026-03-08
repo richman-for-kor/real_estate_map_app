@@ -207,6 +207,15 @@ class ApartmentRepository {
   /// 페이지당 100개씩, `totalCount` 기반으로 전체 페이지를 순차 조회.
   /// (분당구 전체 단지 약 400개 → 4 페이지)
   Future<List<ApartmentInfo>> _fetchAptListFromPublicApi(String bjdCode) async {
+    // .env 키 누락 시 즉시 명확한 예외 — "serviceKey=null" URL 호출 방지
+    final serviceKey = dotenv.env['PUBLIC_DATA_KEY'];
+    if (serviceKey == null || serviceKey.isEmpty) {
+      throw Exception(
+        '[AptRepo] PUBLIC_DATA_KEY가 .env에 설정되지 않았습니다.\n'
+        '공공데이터포털(data.go.kr) → 마이페이지 → 일반 인증키(Encoding) 값을 복사하세요.',
+      );
+    }
+
     const pageSize = 100;
     final result = <ApartmentInfo>[];
     int pageNo = 1;
@@ -215,12 +224,12 @@ class ApartmentRepository {
     while (result.length < totalCount) {
       final url =
           '$_kAptListBaseUrl'
-          '?serviceKey=${dotenv.env['PUBLIC_DATA_KEY']}'
+          '?serviceKey=$serviceKey'
           '&bjdCode=$bjdCode'
           '&numOfRows=$pageSize'
           '&pageNo=$pageNo';
 
-      debugPrint('[AptRepo] 공공API 요청 — page $pageNo');
+      debugPrint('[AptRepo] 공공API 요청 — page $pageNo | URL: $url');
       final res = await http
           .get(Uri.parse(url))
           .timeout(const Duration(seconds: 15));
@@ -299,14 +308,19 @@ class ApartmentRepository {
   /// 실패(네트워크 오류·결과 없음) 시 원본 ApartmentInfo(lat/lng=0.0) 반환.
   Future<ApartmentInfo> _enrichWithKakaoCoords(ApartmentInfo apt) async {
     try {
+      // .env 키 누락 시 좌표 보강 스킵 (0.0 반환)
+      final kakaoKey = dotenv.env['KAKAO_REST_API_KEY'];
+      if (kakaoKey == null || kakaoKey.isEmpty) {
+        debugPrint('[AptRepo] KAKAO_REST_API_KEY 없음 — 좌표 보강 스킵');
+        return apt;
+      }
+
       final query = Uri.encodeComponent('${apt.kaptName} ${apt.kaptAddr}');
       final uri = Uri.parse('$_kKakaoSearchUrl?query=$query&size=1');
       final res = await http
           .get(
             uri,
-            headers: {
-              'Authorization': 'KakaoAK ${dotenv.env['KAKAO_REST_API_KEY']}',
-            },
+            headers: {'Authorization': 'KakaoAK $kakaoKey'},
           )
           .timeout(const Duration(seconds: 10));
 

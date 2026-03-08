@@ -297,15 +297,18 @@ class _MapScreenState extends State<MapScreen> {
   // ── 카카오 로컬 API — 역지오코딩 (좌표 → 법정동 코드) ─────────────────────────
   Future<String?> _getBjdCodeFromCoords(double lat, double lng) async {
     try {
+      final kakaoKey = dotenv.env['KAKAO_REST_API_KEY'];
+      if (kakaoKey == null || kakaoKey.isEmpty) {
+        debugPrint('[Kakao Geo] KAKAO_REST_API_KEY 없음 — 역지오코딩 스킵');
+        return null;
+      }
       final uri = Uri.parse(
         'https://dapi.kakao.com/v2/local/geo/coord2regioncode.json'
         '?x=$lng&y=$lat',
       );
       final res = await http.get(
         uri,
-        headers: {
-          'Authorization': 'KakaoAK ${dotenv.env['KAKAO_REST_API_KEY']}',
-        },
+        headers: {'Authorization': 'KakaoAK $kakaoKey'},
       );
       if (res.statusCode != 200) {
         debugPrint('[Kakao Geo Error ${res.statusCode}] ${res.body}');
@@ -471,14 +474,26 @@ class _MapScreenState extends State<MapScreen> {
     setState(() => _isSearching = true);
 
     try {
+      final kakaoKey = dotenv.env['KAKAO_REST_API_KEY'];
+      if (kakaoKey == null || kakaoKey.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _searchResults = [];
+            _showDropdown = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('카카오 API 키가 설정되지 않았습니다.')),
+          );
+        }
+        return;
+      }
+
       final uri = Uri.parse(
         '$_kKakaoSearchUrl?query=${Uri.encodeComponent(query)}&size=10',
       );
       final res = await http.get(
         uri,
-        headers: {
-          'Authorization': 'KakaoAK ${dotenv.env['KAKAO_REST_API_KEY']}',
-        },
+        headers: {'Authorization': 'KakaoAK $kakaoKey'},
       );
 
       if (!mounted) return;

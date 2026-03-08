@@ -40,17 +40,27 @@ class PublicDataService {
       '[PublicDataService] fetchAptTrades — lawdCd: $lawdCd, dealYmd: $dealYmd',
     );
 
+    // .env 키 누락 시 즉시 명확한 예외 — "serviceKey=null" URL 호출 방지
+    final serviceKey = dotenv.env['PUBLIC_DATA_KEY'];
+    if (serviceKey == null || serviceKey.isEmpty) {
+      throw Exception(
+        '[PublicDataService] PUBLIC_DATA_KEY가 .env에 설정되지 않았습니다.\n'
+        '공공데이터포털(data.go.kr) → 마이페이지 → 일반 인증키(Encoding) 값을 복사하세요.',
+      );
+    }
+
     // ⚠️  serviceKey는 이미 퍼센트 인코딩된 값입니다.
     //     Uri.replace(queryParameters:{})를 사용하면 이중 인코딩이 발생하므로
     //     URL 문자열을 직접 조합합니다.
     final url =
         '$_kBaseUrl'
-        '?serviceKey=${dotenv.env['PUBLIC_DATA_KEY']}'
+        '?serviceKey=$serviceKey'
         '&LAWD_CD=$lawdCd'
         '&DEAL_YMD=$dealYmd'
         '&numOfRows=30'
         '&pageNo=1';
 
+    debugPrint('[PublicDataService] 요청 URL: $url');
     final res = await http.get(Uri.parse(url));
 
     if (res.statusCode != 200) {
