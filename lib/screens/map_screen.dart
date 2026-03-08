@@ -282,7 +282,10 @@ class _MapScreenState extends State<MapScreen> {
     _renderAptMarkers(_kInitialBjdCode);
   }
 
-  Future<void> _onCameraIdle(NCameraPosition position) async {
+  Future<void> _onCameraIdle() async {
+    // 마커 로딩 중엔 _currentBjdCode 갱신 자체를 막아 잘못된 중복 방지를 예방
+    if (_mapController == null || _isMarkersLoading) return;
+    final position = await _mapController!.getCameraPosition();
     final lat = position.target.latitude;
     final lng = position.target.longitude;
     final bjdCode = await _getBjdCodeFromCoords(lat, lng);
@@ -374,6 +377,9 @@ class _MapScreenState extends State<MapScreen> {
       final validApts = apts.where((a) => a.hasValidCoords).toList();
       final markers = <NMarker>[];
       for (final apt in validApts) {
+        // 장시간 비동기(API 호출 + 아이콘 렌더링) 중 위젯 해제 방어
+        if (!mounted) return;
+
         final pos = NLatLng(apt.lat, apt.lng);
         final marker = NMarker(id: apt.kaptCode, position: pos);
 
@@ -407,7 +413,8 @@ class _MapScreenState extends State<MapScreen> {
         markers.add(marker);
       }
 
-      if (!mounted) return;
+      // await 이후 컨트롤러가 무효화될 수 있으므로 재확인
+      if (!mounted || _mapController == null) return;
 
       // ── 2단계: addOverlayAll()로 한 번에 지도에 추가 ──────────────────────
       await _mapController!.addOverlayAll(markers.toSet());
@@ -1966,11 +1973,13 @@ class _AptPriceBubble extends StatelessWidget {
             Text(
               hasPrice ? priceLabel : '시세 준비중',
               style: TextStyle(
-                fontSize: hasPrice ? 14 : 11,
+                fontSize: hasPrice ? 12 : 11,
                 fontWeight: FontWeight.w800,
                 color: hasPrice ? kPrimary : kTextMuted,
                 height: 1.1,
               ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
             // 면적 (있을 때만)
             if (hasArea) ...[

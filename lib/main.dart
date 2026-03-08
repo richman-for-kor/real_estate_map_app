@@ -67,17 +67,9 @@ Future<String?> _initializeApp() async {
       serverClientId: kGoogleServerClientId,
     );
 
-    // ────────────────────────────────────────────────────────────────────────
-    // [QA 디버깅] 401 원인 격리 테스트 — AndroidManifest.xml 의존성 우회
-    //
-    // 목적: SDK가 네이티브 설정(meta-data)을 읽는 경로를 완전히 차단하고,
-    //       Dart 레이어에서 네이버 서버로 clientId를 다이렉트로 주입합니다.
-    //
-    // ⚠️ 테스트 완료 후 아래 clientId 파라미터를 제거하고
-    //    플랫폼 파일 방식(AndroidManifest / Info.plist)으로 반드시 복원하세요.
-    // ────────────────────────────────────────────────────────────────────────
     // ignore: deprecated_member_use  (flutter_naver_map 1.4.4 호환 — 업그레이드 시 FlutterNaverMap.init 으로 교체)
     await NaverMapSdk.instance.initialize(
+      clientId: 'r8mj4hyeaa',
       onAuthFailed: (ex) {
         debugPrint('[네이버 지도 인증 에러]: $ex');
       },

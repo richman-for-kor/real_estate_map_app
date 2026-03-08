@@ -128,10 +128,18 @@ class ApartmentRepository {
             DateTime.now().difference(cachedAt.toDate()).inDays >= 7;
 
         if (!isStale) {
-          debugPrint('[AptRepo] ✅ Cache HIT — ${snap.docs.length}개 단지');
-          return snap.docs.map((d) => ApartmentInfo.fromFirestore(d)).toList();
+          final items =
+              snap.docs.map((d) => ApartmentInfo.fromFirestore(d)).toList();
+          // 유효 좌표가 하나도 없으면 이전 Kakao 실패로 저장된 불량 캐시.
+          // Cache Miss로 처리하여 재호출.
+          if (items.any((a) => a.hasValidCoords)) {
+            debugPrint('[AptRepo] ✅ Cache HIT — ${items.length}개 단지');
+            return items;
+          }
+          debugPrint('[AptRepo] ⚠️ Cache 유효하나 좌표 없음 — 재호출');
+        } else {
+          debugPrint('[AptRepo] ⚠️ Cache STALE — TTL 초과, 재호출');
         }
-        debugPrint('[AptRepo] ⚠️ Cache STALE — TTL 초과, 재호출');
       }
     } catch (e) {
       // Firestore 읽기 실패 → Cache Miss로 진행
@@ -213,7 +221,9 @@ class ApartmentRepository {
           '&pageNo=$pageNo';
 
       debugPrint('[AptRepo] 공공API 요청 — page $pageNo');
-      final res = await http.get(Uri.parse(url));
+      final res = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 15));
 
       if (res.statusCode != 200) {
         // 500: 서비스키 미등록 or bjdCode 형식 오류 (10자리 필요)
@@ -291,12 +301,14 @@ class ApartmentRepository {
     try {
       final query = Uri.encodeComponent('${apt.kaptName} ${apt.kaptAddr}');
       final uri = Uri.parse('$_kKakaoSearchUrl?query=$query&size=1');
-      final res = await http.get(
-        uri,
-        headers: {
-          'Authorization': 'KakaoAK ${dotenv.env['KAKAO_REST_API_KEY']}',
-        },
-      );
+      final res = await http
+          .get(
+            uri,
+            headers: {
+              'Authorization': 'KakaoAK ${dotenv.env['KAKAO_REST_API_KEY']}',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
 
       if (res.statusCode != 200) return apt;
 
