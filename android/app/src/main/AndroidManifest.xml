@@ -60,17 +60,6 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
-        <!--
-        ┌──────────────────────────────────────────────────────────────────────┐
-        │  [CTO] 네이버 지도 Client ID                                           │
-        │  네이버 클라우드 플랫폼 콘솔 → Application → Mobile Dynamic Map 앱에서  │
-        │  발급받은 Client ID를 아래 android:value 에 입력하세요.                  │
-        │  https://console.ncloud.com/naver-service/application                │
-        └──────────────────────────────────────────────────────────────────────┘
-        -->
-        <meta-data
-            android:name="com.naver.maps.map.NCP_KEY_ID"
-            android:value="r8mj4hyeaa" />
     </application>
 
     <!-- Required to query activities that can process text, see:

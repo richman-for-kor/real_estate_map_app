@@ -5,16 +5,21 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../main.dart'
     show
         kPrimary,
+        kPrimaryLight,
         kSurface,
         kBackground,
+        kBorderColor,
         kTextDark,
-        kTextMuted,
-        kBorderColor;
+        kTextMuted;
 import '../services/auth_service.dart';
+import '../services/favorite_service.dart';
+import '../services/recent_view_service.dart';
 import '../widgets/image_viewer_popup.dart';
 import 'edit_profile_screen.dart';
 import 'favorite_list_screen.dart';
+import 'imjang_screen.dart';
 import 'login_screen.dart';
+import 'recent_view_screen.dart';
 import 'settings_screen.dart';
 
 /// 내 정보 탭 화면.
@@ -65,6 +70,9 @@ class _GuestView extends StatelessWidget {
       backgroundColor: kBackground,
       appBar: AppBar(
         title: const Text('내 정보'),
+        backgroundColor: kSurface,
+        elevation: 0,
+        scrolledUnderElevation: 0,
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
@@ -86,7 +94,13 @@ class _GuestView extends StatelessWidget {
       decoration: BoxDecoration(
         color: kSurface,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: kBorderColor, width: 1),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0F000000),
+            blurRadius: 16,
+            offset: Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         children: [
@@ -95,7 +109,7 @@ class _GuestView extends StatelessWidget {
             width: 80,
             height: 80,
             decoration: BoxDecoration(
-              color: kPrimary.withOpacity(0.08),
+              color: kPrimaryLight,
               shape: BoxShape.circle,
             ),
             child: const Icon(Icons.person_outline_rounded, size: 44, color: kPrimary),
@@ -174,7 +188,13 @@ class _GuestView extends StatelessWidget {
           decoration: BoxDecoration(
             color: kSurface,
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: kBorderColor, width: 1),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x0F000000),
+                blurRadius: 16,
+                offset: Offset(0, 4),
+              ),
+            ],
           ),
           child: Column(
             children: features.asMap().entries.map((entry) {
@@ -190,7 +210,7 @@ class _GuestView extends StatelessWidget {
                           width: 42,
                           height: 42,
                           decoration: BoxDecoration(
-                            color: f.color.withOpacity(0.10),
+                            color: f.color.withValues(alpha: 0.10),
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: Icon(f.icon, color: f.color, size: 22),
@@ -216,12 +236,12 @@ class _GuestView extends StatelessWidget {
                             ],
                           ),
                         ),
-                        Icon(Icons.lock_outline_rounded, size: 16, color: Colors.grey.shade400),
+                        Icon(Icons.lock_outline_rounded, size: 16, color: kTextMuted),
                       ],
                     ),
                   ),
                   if (i < features.length - 1)
-                    Divider(height: 1, thickness: 1, color: kBorderColor.withOpacity(0.5)),
+                    Divider(height: 1, thickness: 1, color: kBorderColor),
                 ],
               );
             }).toList(),
@@ -332,6 +352,9 @@ class _ProfileViewState extends State<_ProfileView> {
       backgroundColor: kBackground,
       appBar: AppBar(
         title: const Text('내 정보'),
+        backgroundColor: kSurface,
+        elevation: 0,
+        scrolledUnderElevation: 0,
         actions: [
           IconButton(
             icon: const Icon(Icons.settings_outlined),
@@ -367,7 +390,7 @@ class _ProfileViewState extends State<_ProfileView> {
     );
   }
 
-  /// 프로필 헤더 (아바타 + 이름 + 이메일 + 편집 버튼).
+  /// 프로필 헤더 (아바타 + 이름 + 이메일 + 편집 버튼) — 흰색 배경 iOS 스타일.
   ///
   /// [반응형] 내부 StreamBuilder가 FirebaseAuth.instance.userChanges()를 구독합니다.
   /// EditProfileScreen에서 프로필 사진·닉네임이 변경되어 reload()가 호출되면
@@ -375,13 +398,9 @@ class _ProfileViewState extends State<_ProfileView> {
   Widget _buildProfileHeader(String email) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 24),
+      padding: const EdgeInsets.fromLTRB(20, 24, 20, 24),
       decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [kPrimary, Color(0xFF1E3D6E)],
-        ),
+        color: kSurface,
       ),
       child: SafeArea(
         top: false,
@@ -405,30 +424,28 @@ class _ProfileViewState extends State<_ProfileView> {
                       ? () => showImageViewerDialog(context, _originalPhotoUrl!)
                       : null,
                   child: Container(
-                    width: 62,
-                    height: 62,
+                    width: 64,
+                    height: 64,
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.20),
+                      color: kPrimaryLight,
                       shape: BoxShape.circle,
-                      border: Border.all(
-                          color: Colors.white.withOpacity(0.40), width: 2),
                     ),
                     child: ClipOval(
                       child: photoURL != null
                           ? CachedNetworkImage(
                               imageUrl: photoURL,
                               fit: BoxFit.cover,
-                              placeholder: (_, __) => const Center(
+                              placeholder: (context, url) => const Center(
                                 child: CircularProgressIndicator(
-                                  color: Colors.white54,
+                                  color: kPrimary,
                                   strokeWidth: 2,
                                 ),
                               ),
-                              errorWidget: (_, __, ___) => Center(
+                              errorWidget: (context, url, err) => Center(
                                 child: Text(
                                   initial,
                                   style: const TextStyle(
-                                    color: Colors.white,
+                                    color: kPrimary,
                                     fontSize: 26,
                                     fontWeight: FontWeight.w700,
                                   ),
@@ -439,7 +456,7 @@ class _ProfileViewState extends State<_ProfileView> {
                               child: Text(
                                 initial,
                                 style: const TextStyle(
-                                  color: Colors.white,
+                                  color: kPrimary,
                                   fontSize: 26,
                                   fontWeight: FontWeight.w700,
                                 ),
@@ -456,10 +473,10 @@ class _ProfileViewState extends State<_ProfileView> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '환영합니다, $displayName님!',
+                        displayName,
                         style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 17,
+                          color: kTextDark,
+                          fontSize: 18,
                           fontWeight: FontWeight.w700,
                           letterSpacing: -0.4,
                         ),
@@ -467,8 +484,8 @@ class _ProfileViewState extends State<_ProfileView> {
                       const SizedBox(height: 4),
                       Text(
                         email,
-                        style: TextStyle(
-                          color: Colors.white.withOpacity(0.75),
+                        style: const TextStyle(
+                          color: kTextMuted,
                           fontSize: 13,
                         ),
                         overflow: TextOverflow.ellipsis,
@@ -485,14 +502,14 @@ class _ProfileViewState extends State<_ProfileView> {
                         builder: (_) => const EditProfileScreen()),
                   ),
                   child: Container(
-                    width: 34,
-                    height: 34,
+                    width: 36,
+                    height: 36,
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.15),
+                      color: kPrimaryLight,
                       shape: BoxShape.circle,
                     ),
                     child: const Icon(Icons.edit_outlined,
-                        color: Colors.white, size: 17),
+                        color: kPrimary, size: 17),
                   ),
                 ),
               ],
@@ -504,55 +521,59 @@ class _ProfileViewState extends State<_ProfileView> {
   }
 
   Widget _buildQuickStats() {
-    const stats = [
-      (label: '관심 매물', value: '0'),
-      (label: '최근 본 매물', value: '0'),
-      (label: '설정 알림', value: '0'),
-    ];
-
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Container(
         decoration: BoxDecoration(
           color: kSurface,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: kBorderColor, width: 1),
+          boxShadow: const [
+            BoxShadow(color: Color(0x0F000000), blurRadius: 16, offset: Offset(0, 4)),
+          ],
         ),
         padding: const EdgeInsets.symmetric(vertical: 16),
         child: Row(
-          children: stats.asMap().entries.map((entry) {
-            final i = entry.key;
-            final s = entry.value;
-            return Expanded(
-              child: Column(
-                children: [
-                  Text(
-                    s.value,
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800,
-                      color: kPrimary,
-                      letterSpacing: -0.5,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    s.label,
-                    style: const TextStyle(fontSize: 12, color: kTextMuted),
-                  ),
-                  // 구분선 (마지막 아이템 제외)
-                  if (i < stats.length - 1)
-                    Positioned(
-                      right: 0,
-                      child: Container(width: 1, height: 24, color: kBorderColor),
-                    ),
-                ],
+          children: [
+            _StatCell(
+              label: '관심 매물',
+              stream: FavoriteService().favoriteCountStream(),
+              showDivider: true,
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const FavoriteListScreen()),
               ),
-            );
-          }).toList(),
+            ),
+            _StatCell(
+              label: '최근 본 매물',
+              stream: RecentViewService().recentViewCountStream(),
+              showDivider: true,
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const RecentViewScreen()),
+              ),
+            ),
+            _StatCell(
+              label: '임장 노트',
+              stream: _imjangCountStream(),
+              showDivider: false,
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const ImjangScreen()),
+              ),
+            ),
+          ],
         ),
       ),
     );
+  }
+
+  Stream<int> _imjangCountStream() {
+    final uid = widget.user.uid;
+    return FirebaseFirestore.instance
+        .collection('imjang_records')
+        .where('uid', isEqualTo: uid)
+        .snapshots()
+        .map((s) => s.size);
   }
 
   Widget _buildMenuSection() {
@@ -568,12 +589,44 @@ class _ProfileViewState extends State<_ProfileView> {
             MaterialPageRoute(builder: (_) => const FavoriteListScreen()),
           ),
         ),
-        _MenuItem(icon: Icons.history_rounded, iconColor: const Color(0xFF1565C0), title: '최근 본 매물', badge: null, onTap: null),
-        _MenuItem(icon: Icons.notifications_rounded, iconColor: const Color(0xFFFF6F00), title: '알림 설정', badge: '0', onTap: null),
+        _MenuItem(
+          icon: Icons.history_rounded,
+          iconColor: const Color(0xFF1565C0),
+          title: '최근 본 매물',
+          badge: null,
+          onTap: () => Navigator.push(
+            context, MaterialPageRoute(builder: (_) => const RecentViewScreen()),
+          ),
+        ),
+        _MenuItem(
+          icon: Icons.notifications_rounded,
+          iconColor: const Color(0xFFFF6F00),
+          title: '알림 설정',
+          badge: null,
+          onTap: () => Navigator.push(
+            context, MaterialPageRoute(builder: (_) => const SettingsScreen()),
+          ),
+        ),
       ]),
       _MenuGroup(title: '고객지원', items: [
-        _MenuItem(icon: Icons.headset_mic_outlined, iconColor: const Color(0xFF2E7D32), title: '고객센터', badge: null, onTap: null),
-        _MenuItem(icon: Icons.info_outline_rounded, iconColor: kTextMuted, title: '앱 정보', badge: null, onTap: null),
+        _MenuItem(
+          icon: Icons.headset_mic_outlined,
+          iconColor: const Color(0xFF2E7D32),
+          title: '고객센터',
+          badge: null,
+          onTap: () => Navigator.push(
+            context, MaterialPageRoute(builder: (_) => const SettingsScreen()),
+          ),
+        ),
+        _MenuItem(
+          icon: Icons.info_outline_rounded,
+          iconColor: kTextMuted,
+          title: '앱 정보',
+          badge: null,
+          onTap: () => Navigator.push(
+            context, MaterialPageRoute(builder: (_) => const SettingsScreen()),
+          ),
+        ),
       ]),
     ];
 
@@ -600,7 +653,13 @@ class _ProfileViewState extends State<_ProfileView> {
                 decoration: BoxDecoration(
                   color: kSurface,
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: kBorderColor, width: 1),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x0F000000),
+                      blurRadius: 16,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
                 ),
                 child: Column(
                   children: group.items.asMap().entries.map((entry) {
@@ -624,7 +683,7 @@ class _ProfileViewState extends State<_ProfileView> {
                                   width: 38,
                                   height: 38,
                                   decoration: BoxDecoration(
-                                    color: item.iconColor.withOpacity(0.10),
+                                    color: item.iconColor.withValues(alpha: 0.10),
                                     borderRadius: BorderRadius.circular(10),
                                   ),
                                   child: Icon(item.icon, color: item.iconColor, size: 20),
@@ -645,7 +704,7 @@ class _ProfileViewState extends State<_ProfileView> {
                                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                                     margin: const EdgeInsets.only(right: 6),
                                     decoration: BoxDecoration(
-                                      color: kPrimary.withOpacity(0.08),
+                                      color: kPrimaryLight,
                                       borderRadius: BorderRadius.circular(10),
                                     ),
                                     child: Text(
@@ -657,13 +716,13 @@ class _ProfileViewState extends State<_ProfileView> {
                                       ),
                                     ),
                                   ),
-                                Icon(Icons.chevron_right_rounded, color: Colors.grey.shade400, size: 20),
+                                Icon(Icons.chevron_right_rounded, color: kTextMuted, size: 20),
                               ],
                             ),
                           ),
                         ),
                         if (i < group.items.length - 1)
-                          Divider(height: 1, thickness: 1, indent: 68, color: kBorderColor.withOpacity(0.5)),
+                          Divider(height: 1, thickness: 1, indent: 68, color: kBorderColor),
                       ],
                     );
                   }).toList(),
@@ -717,4 +776,68 @@ class _MenuItem {
   final String? badge;
   final VoidCallback? onTap;
   const _MenuItem({required this.icon, required this.iconColor, required this.title, required this.badge, this.onTap});
+}
+
+/// 퀵 통계 셀 — Firestore 스트림으로 실시간 카운트 표시.
+class _StatCell extends StatelessWidget {
+  const _StatCell({
+    required this.label,
+    required this.stream,
+    required this.showDivider,
+    this.onTap,
+  });
+
+  final String label;
+  final Stream<int> stream;
+  final bool showDivider;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  StreamBuilder<int>(
+                    stream: stream,
+                    builder: (context, snap) {
+                      final count = snap.data ?? 0;
+                      return Text(
+                        '$count',
+                        style: const TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.w800,
+                          color: kPrimary,
+                          letterSpacing: -0.5,
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 4),
+                  Text(label, style: const TextStyle(fontSize: 12, color: kTextMuted)),
+                ],
+              ),
+            ),
+          ),
+          if (showDivider)
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: Container(width: 1, height: 24, color: kBorderColor),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 }

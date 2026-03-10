@@ -120,7 +120,52 @@ class _WriteImjangScreenState extends State<WriteImjangScreen> {
     setState(() => _selectedImages.removeAt(index));
   }
 
-  // ── 저장 ────────────────────────────────────────────────────────────────────
+  // ── 주소 파싱 ────────────────────────────────────────────────────────────────
+
+  static String _parseSido(String address) {
+    if (address.isEmpty) return '';
+    final p = address.split(' ').first;
+    if (p.contains('서울')) return '서울';
+    if (p.contains('경기')) return '경기';
+    if (p.contains('인천')) return '인천';
+    if (p.contains('부산')) return '부산';
+    if (p.contains('대구')) return '대구';
+    if (p.contains('광주')) return '광주';
+    if (p.contains('대전')) return '대전';
+    if (p.contains('울산')) return '울산';
+    if (p.contains('세종')) return '세종';
+    if (p.contains('강원')) return '강원';
+    if (p.contains('충북') || (p.contains('충청') && p.contains('북'))) return '충북';
+    if (p.contains('충남') || (p.contains('충청') && p.contains('남'))) return '충남';
+    if (p.contains('전북') || (p.contains('전라') && p.contains('북'))) return '전북';
+    if (p.contains('전남') || (p.contains('전라') && p.contains('남'))) return '전남';
+    if (p.contains('경북') || (p.contains('경상') && p.contains('북'))) return '경북';
+    if (p.contains('경남') || (p.contains('경상') && p.contains('남'))) return '경남';
+    if (p.contains('제주')) return '제주';
+    return p;
+  }
+
+  static String _parseSigungu(String address) {
+    final parts = address.split(' ');
+    if (parts.length < 2) return '';
+    final p1 = parts[1];
+    if (parts.length >= 3) {
+      final p2 = parts[2];
+      if ((p1.endsWith('시') || p1.endsWith('군')) && p2.endsWith('구')) {
+        return '$p1 $p2';
+      }
+    }
+    return p1;
+  }
+
+  static String _parseEupmyeondong(String address) {
+    final parts = address.split(' ');
+    for (int i = parts.length - 1; i >= 0; i--) {
+      final p = parts[i];
+      if (p.endsWith('동') || p.endsWith('읍') || p.endsWith('면')) return p;
+    }
+    return '';
+  }
 
   String _deriveRegion(String address) {
     if (address.contains('서울')) return '서울';
@@ -128,6 +173,8 @@ class _WriteImjangScreenState extends State<WriteImjangScreen> {
     if (address.contains('부산') || address.contains('경남')) return '부산/경남';
     return '지방';
   }
+
+  // ── 저장 ────────────────────────────────────────────────────────────────────
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
@@ -143,14 +190,18 @@ class _WriteImjangScreenState extends State<WriteImjangScreen> {
 
     setState(() => _isSaving = true);
     try {
+      final addr = _selectedAddress!;
       await ImjangService().saveImjangRecord(
         title: _titleCtrl.text.trim(),
-        address: _selectedAddress!,
-        region: _deriveRegion(_selectedAddress!),
+        address: addr,
+        region: _deriveRegion(addr),
         latitude: _selectedLat!,
         longitude: _selectedLng!,
         review: _reviewCtrl.text.trim(),
         mediaFiles: _selectedImages,
+        sido: _parseSido(addr),
+        sigungu: _parseSigungu(addr),
+        eupmyeondong: _parseEupmyeondong(addr),
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -222,6 +273,9 @@ class _WriteImjangScreenState extends State<WriteImjangScreen> {
                 _buildSectionLabel('사진 첨부 (최대 10장)'),
                 const SizedBox(height: 8),
                 _buildImagePicker(),
+                const SizedBox(height: 32),
+                _buildActionButtons(),
+                const SizedBox(height: 16),
               ],
             ),
           ),
@@ -381,6 +435,64 @@ class _WriteImjangScreenState extends State<WriteImjangScreen> {
           }),
         ],
       ),
+    );
+  }
+  Widget _buildActionButtons() {
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton(
+            onPressed: _isSaving ? null : () => Navigator.pop(context),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              side: BorderSide(color: kBorderColor),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            child: const Text(
+              '취소',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: kTextMuted,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          flex: 2,
+          child: ElevatedButton(
+            onPressed: _isSaving ? null : _save,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: kPrimary,
+              foregroundColor: kSurface,
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              elevation: 0,
+            ),
+            child: _isSaving
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Text(
+                    '저장',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+          ),
+        ),
+      ],
     );
   }
 }

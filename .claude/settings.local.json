@@ -9,7 +9,26 @@
       "WebFetch(domain:pub.dev)",
       "WebFetch(domain:github.com)",
       "Bash(dart analyze:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(keytool:*)",
+      "Bash(flutter clean:*)",
+      "WebFetch(domain:api.ncloud-docs.com)",
+      "WebFetch(domain:navermaps.github.io)",
+      "Bash(xargs grep:*)",
+      "Bash(firebase deploy:*)",
+      "Bash(flutter devices:*)",
+      "Bash(pkill:*)",
+      "Bash(flutter run:*)",
+      "Bash(\"$ADB\":*)",
+      "Bash(flutter build:*)",
+      "Bash(\"$ADB\" install:*)",
+      "Bash(\"$ADB\" shell:*)",
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(firebase firestore:delete:*)",
+      "Bash(firebase:*)",
+      "Bash(yes:*)",
+      "Bash(npm install:*)"
     ]
   }
 }

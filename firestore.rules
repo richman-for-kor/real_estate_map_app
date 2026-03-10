@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── 아파트 단지 캐시 (공공데이터 Read-Through Cache) ──────────────────────
+    // 공공데이터포털에서 받아온 비민감 공개 데이터.
+    // 읽기: 누구나, 쓰기: 인증 여부 무관 (캐시 저장은 앱에서만 수행)
+    match /apartments/{kaptCode} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // ── 시세 캐시 (실거래가 일일 캐시) ─────────────────────────────────────────
+    // 공공데이터 비민감 정보. 읽기/쓰기 모두 허용 (앱에서만 호출)
+    match /apt_price_cache/{lawdCd} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // ── 유저 프로필 ────────────────────────────────────────────────────────────
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+
+      // ── 즐겨찾기 (서브컬렉션) ──────────────────────────────────────────────
+      match /favorites/{favoriteId} {
+        allow read, write, delete: if request.auth != null
+          && request.auth.uid == uid;
+        allow create: if request.auth != null && request.auth.uid == uid;
+      }
+
+      // ── 임장노트 house_logs (서브컬렉션) ───────────────────────────────────
+      // users/{uid}/house_logs/{buildingId}/records/{recordId}
+      match /house_logs/{buildingId}/records/{recordId} {
+        allow read, write, delete: if request.auth != null
+          && request.auth.uid == uid;
+        allow create: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+
+    // ── 로그인 기록 ────────────────────────────────────────────────────────────
+    match /login_logs/{logId} {
+      allow create: if request.auth != null;
+      allow read: if false;
+    }
+
+    // ── 홈 화면 시세 일일 캐시 (모든 사용자 공통, 비민감 공개 데이터) ────────────
+    match /market_stats_cache/{dateId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // ── 임장 기록 (지도 탭 바텀시트 — 위치 기반 메모) ──────────────────────────
+    match /imjang_records/{recordId} {
+      allow read, write, delete: if request.auth != null
+        && request.auth.uid == resource.data.uid;
+      allow create: if request.auth != null;
+    }
+  }
+}

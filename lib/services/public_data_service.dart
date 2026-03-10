@@ -35,6 +35,7 @@ class PublicDataService {
   Future<AptTradeData> fetchAptTrades({
     required String lawdCd,
     required String dealYmd,
+    int numOfRows = 30,
   }) async {
     debugPrint(
       '[PublicDataService] fetchAptTrades — lawdCd: $lawdCd, dealYmd: $dealYmd',
@@ -57,7 +58,7 @@ class PublicDataService {
         '?serviceKey=$serviceKey'
         '&LAWD_CD=$lawdCd'
         '&DEAL_YMD=$dealYmd'
-        '&numOfRows=30'
+        '&numOfRows=$numOfRows'
         '&pageNo=1';
 
     debugPrint('[PublicDataService] 요청 URL: $url');
@@ -183,15 +184,44 @@ class AptTradeRecord {
   String get pyeongLabel => '${(area / 3.30579).round()}평';
 
   /// 계약일 표시. 예: "25.11.05"
-  String get dealDateStr =>
-      '${dealYear.toString().substring(2)}.'
-      '${dealMonth.toString().padLeft(2, '0')}.'
-      '${dealDay.toString().padLeft(2, '0')}';
+  String get dealDateStr {
+    final yearStr = dealYear.toString();
+    final yy = yearStr.length >= 4 ? yearStr.substring(2) : yearStr;
+    final mm = dealMonth > 0 ? dealMonth.toString().padLeft(2, '0') : '--';
+    final dd = dealDay > 0 ? dealDay.toString().padLeft(2, '0') : '--';
+    return '$yy.$mm.$dd';
+  }
 
   static String _comma(int n) => n.toString().replaceAllMapped(
     RegExp(r'(\d)(?=(\d{3})+(?!\d))'),
     (m) => '${m[1]},',
   );
+
+  /// Firestore Map → AptTradeRecord 역직렬화.
+  factory AptTradeRecord.fromMap(Map<String, dynamic> m) => AptTradeRecord(
+    complexName: (m['complexName'] as String?) ?? '',
+    dongName: (m['dongName'] as String?) ?? '',
+    area: (m['area'] as num?)?.toDouble() ?? 0.0,
+    floor: (m['floor'] as num?)?.toInt() ?? 0,
+    price: (m['price'] as num?)?.toInt() ?? 0,
+    dealYear: (m['dealYear'] as num?)?.toInt() ?? 0,
+    dealMonth: (m['dealMonth'] as num?)?.toInt() ?? 0,
+    dealDay: (m['dealDay'] as num?)?.toInt() ?? 0,
+    buildYear: (m['buildYear'] as num?)?.toInt() ?? 0,
+  );
+
+  /// AptTradeRecord → Firestore Map 직렬화.
+  Map<String, dynamic> toMap() => {
+    'complexName': complexName,
+    'dongName': dongName,
+    'area': area,
+    'floor': floor,
+    'price': price,
+    'dealYear': dealYear,
+    'dealMonth': dealMonth,
+    'dealDay': dealDay,
+    'buildYear': buildYear,
+  };
 
   /// 공공 API XML → AptTradeRecord 파싱.
   factory AptTradeRecord.fromXml(XmlElement el) {
@@ -199,17 +229,17 @@ class AptTradeRecord {
         el.findElements(tag).firstOrNull?.innerText.trim() ?? '';
 
     return AptTradeRecord(
-      complexName: _text('아파트'),
-      dongName: _text('법정동'),
-      area: double.tryParse(_text('전용면적')) ?? 0.0,
-      floor: int.tryParse(_text('층')) ?? 0,
+      complexName: _text('aptNm'),
+      dongName: _text('umdNm'),
+      area: double.tryParse(_text('excluUseAr')) ?? 0.0,
+      floor: int.tryParse(_text('floor')) ?? 0,
       price:
-          int.tryParse(_text('거래금액').replaceAll(',', '').replaceAll(' ', '')) ??
+          int.tryParse(_text('dealAmount').replaceAll(',', '').replaceAll(' ', '')) ??
           0,
-      dealYear: int.tryParse(_text('년')) ?? 0,
-      dealMonth: int.tryParse(_text('월')) ?? 0,
-      dealDay: int.tryParse(_text('일')) ?? 0,
-      buildYear: int.tryParse(_text('건축년도')) ?? 0,
+      dealYear: int.tryParse(_text('dealYear')) ?? 0,
+      dealMonth: int.tryParse(_text('dealMonth')) ?? 0,
+      dealDay: int.tryParse(_text('dealDay')) ?? 0,
+      buildYear: int.tryParse(_text('buildYear')) ?? 0,
     );
   }
 }

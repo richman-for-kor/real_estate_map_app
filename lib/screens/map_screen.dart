@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:geolocator/geolocator.dart';
@@ -16,7 +16,6 @@ import '../main.dart'
         kPrimary,
         kSecondary,
         kSurface,
-        kBackground,
         kTextDark,
         kTextMuted,
         kBorderColor;
@@ -27,7 +26,9 @@ import '../services/imjang_service.dart';
 import '../services/public_data_service.dart';
 import '../services/apartment_repository.dart';
 import '../services/favorite_service.dart';
+import '../services/recent_view_service.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'imjang_note_detail_screen.dart';
 
 // ─── 카카오 로컬 API (키워드 장소 검색) 설정 ───────────────────────────────────
 // ⚠️  아래 키를 카카오 디벨로퍼스(developers.kakao.com)에서 발급받은
@@ -37,100 +38,75 @@ const _kKakaoSearchUrl = 'https://dapi.kakao.com/v2/local/search/keyword.json';
 // ─── 색상 상수 ─────────────────────────────────────────────────────────────────
 const _kPageBg = Color(0xFFF2F2F7);
 const _kCardBg = Colors.white;
-const _kRed = Color(0xFFE53935);
-const _kGreen = Color(0xFF2E7D32);
-const _kOrange = Color(0xFFE65100);
 
-// ─── 차트 Mock 데이터 ─────────────────────────────────────────────────────────
-const _kSaleSpots = [
-  FlSpot(1, 11.8),
-  FlSpot(2, 12.0),
-  FlSpot(3, 12.2),
-  FlSpot(4, 12.4),
-  FlSpot(5, 12.5),
-  FlSpot(6, 12.7),
-  FlSpot(7, 13.0),
-  FlSpot(8, 13.1),
-  FlSpot(9, 13.3),
-  FlSpot(10, 13.5),
-  FlSpot(11, 13.7),
-  FlSpot(12, 13.8),
-];
-const _kJeonseSpots = [
-  FlSpot(1, 8.5),
-  FlSpot(2, 8.7),
-  FlSpot(3, 8.9),
-  FlSpot(4, 9.0),
-  FlSpot(5, 9.2),
-  FlSpot(6, 9.4),
-  FlSpot(7, 9.6),
-  FlSpot(8, 9.7),
-  FlSpot(9, 9.8),
-  FlSpot(10, 10.0),
-  FlSpot(11, 10.1),
-  FlSpot(12, 10.2),
-];
-
-// ─── 평형별 투자 Mock 데이터 ──────────────────────────────────────────────────
-class _UnitData {
-  const _UnitData({
-    required this.salePrice,
-    required this.jeonsePrice,
-    required this.gap,
-    required this.jeonseRate,
-    required this.highPrice,
-    required this.saleSpots,
-    required this.jeonseSpots,
-    required this.chartMinY,
-    required this.chartMaxY,
-  });
-  final String salePrice, jeonsePrice, gap, jeonseRate, highPrice;
-  final List<FlSpot> saleSpots, jeonseSpots;
-  final double chartMinY, chartMaxY;
-}
-
-const _kUnitDataMap = <String, _UnitData>{
-  '15평': _UnitData(
-    salePrice: '8.5억',
-    jeonsePrice: '6.8억',
-    gap: '1.7억',
-    jeonseRate: '80%',
-    highPrice: '9.2억',
-    chartMinY: 4.0,
-    chartMaxY: 11.0,
-    saleSpots: [FlSpot(1, 7.2), FlSpot(6, 7.9), FlSpot(12, 8.5)],
-    jeonseSpots: [FlSpot(1, 5.8), FlSpot(6, 6.4), FlSpot(12, 6.8)],
-  ),
-  '24평': _UnitData(
-    salePrice: '13.5억',
-    jeonsePrice: '10.3억',
-    gap: '3.2억',
-    jeonseRate: '76%',
-    highPrice: '15.8억',
-    chartMinY: 7.0,
-    chartMaxY: 16.0,
-    saleSpots: _kSaleSpots,
-    jeonseSpots: _kJeonseSpots,
-  ),
-  '33평': _UnitData(
-    salePrice: '19.8억',
-    jeonsePrice: '14.2억',
-    gap: '5.6억',
-    jeonseRate: '72%',
-    highPrice: '22.5억',
-    chartMinY: 10.0,
-    chartMaxY: 24.0,
-    saleSpots: [FlSpot(1, 16.5), FlSpot(6, 17.9), FlSpot(12, 19.8)],
-    jeonseSpots: [FlSpot(1, 12.0), FlSpot(6, 13.2), FlSpot(12, 14.2)],
-  ),
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MapScreen
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── 아파트 단지명 정규화 (파일 레벨 — MapScreen + PropertyInfoSheet 공용) ────
+/// 법정동 접두사·괄호·공백·차/단지 suffix 제거, LG↔엘지 통합.
+String _normalizeAptName(String name) {
+  var n = name;
+  for (final prefix in const [
+    '정자', '구미', '분당', '수내', '서현', '이매', '판교',
+    '야탑', '금곡', '중앙', '보평', '장안', '율동', '동판교',
+  ]) {
+    if (n.startsWith(prefix)) {
+      n = n.substring(prefix.length);
+      break;
+    }
+  }
+  n = n.replaceAll(RegExp(r'[\s()]'), '');
+  n = n.replaceAll(RegExp(r'(\d+)(차|단지)'), r'\1');
+  n = n.replaceAll('LG', '엘지').replaceAll('lg', '엘지');
+  return n;
+}
+
+/// 정규화된 두 이름이 minLen자 이상의 공통 부분 문자열을 공유하는지 확인.
+bool _sharesCoreSubstring(String a, String b, {int minLen = 3}) {
+  if (a.length < minLen || b.length < minLen) return false;
+  for (int start = 0; start <= a.length - minLen; start++) {
+    for (int len = a.length - start; len >= minLen; len--) {
+      if (b.contains(a.substring(start, start + len))) return true;
+    }
+  }
+  return false;
+}
+
+/// trade records 중 kaptName과 가장 잘 매칭되는 complexName 반환.
+String? _resolveApiName(List<AptTradeRecord> records, String kaptName) {
+  if (records.isEmpty) return null;
+  // 1. 정확 일치
+  for (final r in records) {
+    if (r.complexName.trim() == kaptName) return r.complexName.trim();
+  }
+  // 2. contains 일치
+  for (final r in records) {
+    final name = r.complexName.trim();
+    if (name.contains(kaptName) || kaptName.contains(name)) return name;
+  }
+  // 3. 정규화 후 공통 핵심어
+  final normKapt = _normalizeAptName(kaptName);
+  for (final r in records) {
+    final normName = _normalizeAptName(r.complexName.trim());
+    if (normName == normKapt ||
+        normName.contains(normKapt) ||
+        normKapt.contains(normName) ||
+        _sharesCoreSubstring(normKapt, normName)) {
+      return r.complexName.trim();
+    }
+  }
+  return null;
+}
+
+typedef _MapJumpTarget = ({double lat, double lng});
+
 class MapScreen extends StatefulWidget {
-  const MapScreen({super.key});
+  const MapScreen({super.key, this.jumpTarget});
+
+  /// 홈 탭에서 지역 카드를 탭할 때 지도 이동 좌표를 전달하는 notifier
+  final ValueNotifier<_MapJumpTarget?>? jumpTarget;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
@@ -138,6 +114,7 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   NaverMapController? _mapController;
+  _MapJumpTarget? _pendingJump; // mapController 준비 전 요청된 이동 대상
   final _searchController = TextEditingController();
 
   // 검색 상태 관리
@@ -149,10 +126,12 @@ class _MapScreenState extends State<MapScreen> {
   bool _isLocationLoading = false;
   bool _isMarkersLoading = false; // 아파트 마커 데이터 로딩 중 여부
 
+
   String? _currentBjdCode; // 현재 카메라 중심의 법정동 코드
 
   NMarker? _searchMarker;
-  final List<NMarker> _aptMarkers = [];
+  // kaptCode → NMarker (뷰포트 기반 관리)
+  final Map<String, NMarker> _aptMarkerMap = {};
 
   // 지도 초기 위치 (분당 미금역) 에 해당하는 법정동코드.
   // onCameraIdle + 역지오코딩 구현 시 동적으로 교체됩니다.
@@ -182,10 +161,36 @@ class _MapScreenState extends State<MapScreen> {
   );
 
   @override
+  void initState() {
+    super.initState();
+    widget.jumpTarget?.addListener(_onJumpTarget);
+  }
+
+  @override
   void dispose() {
+    widget.jumpTarget?.removeListener(_onJumpTarget);
     _debounce?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _onJumpTarget() {
+    final t = widget.jumpTarget?.value;
+    if (t == null) return;
+    if (_mapController != null) {
+      _moveCameraTo(t.lat, t.lng);
+    } else {
+      _pendingJump = t;
+    }
+  }
+
+  void _moveCameraTo(double lat, double lng) {
+    _mapController?.updateCamera(
+      NCameraUpdate.scrollAndZoomTo(
+        target: NLatLng(lat, lng),
+        zoom: 14,
+      ),
+    );
   }
 
   @override
@@ -275,23 +280,98 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── NaverMap Callbacks ───────────────────────────────────────────────────
 
-  void _onMapReady(NaverMapController controller) {
+  Future<void> _onMapReady(NaverMapController controller) async {
     _mapController = controller;
-    _tryActivateLocationIfGranted();
-    _currentBjdCode = _kInitialBjdCode;
-    _renderAptMarkers(_kInitialBjdCode);
+
+    // 홈 탭 지역 카드에서 이동 요청이 있으면 해당 위치로 이동
+    if (_pendingJump != null) {
+      _moveCameraTo(_pendingJump!.lat, _pendingJump!.lng);
+      _pendingJump = null;
+      _currentBjdCode = _kInitialBjdCode;
+      _renderAptMarkers(_kInitialBjdCode);
+      return;
+    }
+
+    // GPS 권한이 있으면 현재 위치를 기본값으로 사용
+    bool movedToCurrentLocation = false;
+    try {
+      final permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.whileInUse ||
+          permission == LocationPermission.always) {
+        final pos = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+          ),
+        ).timeout(const Duration(seconds: 5));
+
+        if (!mounted) return;
+        controller.setLocationTrackingMode(NLocationTrackingMode.noFollow);
+        await _customizeLocationOverlay();
+        await controller.updateCamera(
+          NCameraUpdate.scrollAndZoomTo(
+            target: NLatLng(pos.latitude, pos.longitude),
+            zoom: 14,
+          ),
+        );
+        final bjdCode =
+            await _getBjdCodeFromCoords(pos.latitude, pos.longitude);
+        _currentBjdCode = bjdCode ?? _kInitialBjdCode;
+        _renderAptMarkers(_currentBjdCode!);
+        movedToCurrentLocation = true;
+      }
+    } catch (e) {
+      debugPrint('[MapScreen] 초기 현재 위치 이동 실패: $e');
+    }
+
+    if (!movedToCurrentLocation) {
+      _currentBjdCode = _kInitialBjdCode;
+      _renderAptMarkers(_kInitialBjdCode);
+    }
   }
 
   Future<void> _onCameraIdle() async {
-    // 마커 로딩 중엔 _currentBjdCode 갱신 자체를 막아 잘못된 중복 방지를 예방
+    debugPrint('[CameraIdle] 트리거 — loading=$_isMarkersLoading, ctrl=${_mapController != null}');
     if (_mapController == null || _isMarkersLoading) return;
     final position = await _mapController!.getCameraPosition();
     final lat = position.target.latitude;
     final lng = position.target.longitude;
+    final zoom = position.zoom;
+    debugPrint('[CameraIdle] 좌표: ($lat, $lng) zoom=$zoom');
+    // 줌 레벨 12 미만은 너무 넓은 범위 — 스킵
+    if (zoom < 12) {
+      debugPrint('[CameraIdle] zoom<12 스킵');
+      return;
+    }
+    // 카메라가 이동할 때마다 뷰포트 밖 마커 정리
+    if (!_isMarkersLoading) {
+      await _removeOutOfBoundsMarkers(NLatLng(lat, lng), zoom);
+    }
     final bjdCode = await _getBjdCodeFromCoords(lat, lng);
+    debugPrint('[CameraIdle] bjdCode=$bjdCode, 현재=$_currentBjdCode');
     if (bjdCode == null || bjdCode == _currentBjdCode) return;
     _currentBjdCode = bjdCode;
     _renderAptMarkers(bjdCode);
+  }
+
+  // ── 뷰포트 밖 마커 제거 ────────────────────────────────────────────────────
+  Future<void> _removeOutOfBoundsMarkers(NLatLng center, double zoom) async {
+    if (_mapController == null || _aptMarkerMap.isEmpty) return;
+    // 줌 14 기준 ±0.08° (≈8km) 이내 마커 유지, 이를 벗어나면 제거
+    final span = 0.08 / pow(2.0, zoom - 14);
+    final toRemove = _aptMarkerMap.entries
+        .where((e) {
+          final pos = e.value.position;
+          return (pos.latitude - center.latitude).abs() > span ||
+              (pos.longitude - center.longitude).abs() > span;
+        })
+        .map((e) => e.key)
+        .toList();
+    if (toRemove.isEmpty) return;
+    for (final id in toRemove) {
+      await _mapController!.deleteOverlay(_aptMarkerMap[id]!.info);
+      _aptMarkerMap.remove(id);
+    }
+    debugPrint('[MapScreen] 뷰포트 밖 마커 제거 — ${toRemove.length}개, 남은 ${_aptMarkerMap.length}개');
   }
 
   // ── 카카오 로컬 API — 역지오코딩 (좌표 → 법정동 코드) ─────────────────────────
@@ -306,10 +386,9 @@ class _MapScreenState extends State<MapScreen> {
         'https://dapi.kakao.com/v2/local/geo/coord2regioncode.json'
         '?x=$lng&y=$lat',
       );
-      final res = await http.get(
-        uri,
-        headers: {'Authorization': 'KakaoAK $kakaoKey'},
-      );
+      final res = await http
+          .get(uri, headers: {'Authorization': 'KakaoAK $kakaoKey'})
+          .timeout(const Duration(seconds: 5));
       if (res.statusCode != 200) {
         debugPrint('[Kakao Geo Error ${res.statusCode}] ${res.body}');
         return null;
@@ -328,25 +407,20 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  Future<void> _tryActivateLocationIfGranted() async {
-    final permission = await Geolocator.checkPermission();
-    if ((permission == LocationPermission.whileInUse ||
-            permission == LocationPermission.always) &&
-        _mapController != null &&
-        mounted) {
-      _mapController!.setLocationTrackingMode(NLocationTrackingMode.noFollow);
-    }
-  }
-
   // ── 말풍선 마커 아이콘 생성 ──────────────────────────────────────────────
-  // NOverlayImage.fromWidget()은 Flutter 위젯을 비트맵으로 렌더링.
-  // 가격·면적 정보가 있으면 말풍선, 없으면 기본 핀 아이콘 사용.
-  Future<NOverlayImage?> _buildMarkerIcon(ApartmentInfo apt) async {
+  Future<NOverlayImage?> _buildMarkerIcon(
+    ApartmentInfo apt, {
+    String priceLabel = '',
+    String pyeongLabel = '',
+  }) async {
     try {
       return await NOverlayImage.fromWidget(
         context: context,
-        size: const Size(72, 52),
-        widget: _AptPriceBubble(priceLabel: apt.kaptName, areaLabel: ''),
+        size: const Size(76, 60),
+        widget: _AptPriceBubble(
+          priceLabel: priceLabel,
+          pyeongLabel: pyeongLabel,
+        ),
       );
     } catch (e) {
       debugPrint('[MapScreen] 마커 아이콘 생성 실패 (${apt.kaptName}): $e');
@@ -361,32 +435,63 @@ class _MapScreenState extends State<MapScreen> {
 
     setState(() => _isMarkersLoading = true);
 
-    // 기존 마커 일괄 제거
-    if (_aptMarkers.isNotEmpty) {
-      await _mapController!.clearOverlays(type: NOverlayType.marker);
-      _aptMarkers.clear();
-    }
-
     try {
-      final apts = await ApartmentRepository.instance.getApartmentsByBjdCode(
-        bjdCode,
-      );
+      // 단지 목록 + 지역 실거래 가격맵을 병렬 로드
+      final lawdCd = bjdCode.length >= 5 ? bjdCode.substring(0, 5) : bjdCode;
+      final results = await Future.wait([
+        ApartmentRepository.instance.getApartmentsByBjdCode(bjdCode),
+        _fetchDistrictPriceMap(lawdCd),
+      ]);
 
       if (!mounted) return;
 
+      final apts = results[0] as List<ApartmentInfo>;
+      final priceMap = results[1] as Map<String, _MarkerPrice>;
+
       // ── 1단계: 마커 객체 + 아이콘 순차 생성 (UI 프리징 방어) ─────────────
-      // Future.wait으로 수백 개 NOverlayImage.fromWidget을 동시 호출하면
-      // UI 스레드가 블로킹됩니다. 순차 for 루프로 변경하여 렌더링 병목을 방지합니다.
       final validApts = apts.where((a) => a.hasValidCoords).toList();
       final markers = <NMarker>[];
       for (final apt in validApts) {
-        // 장시간 비동기(API 호출 + 아이콘 렌더링) 중 위젯 해제 방어
         if (!mounted) return;
+        // 이미 그려진 마커는 스킵
+        if (_aptMarkerMap.containsKey(apt.kaptCode)) continue;
 
         final pos = NLatLng(apt.lat, apt.lng);
         final marker = NMarker(id: apt.kaptCode, position: pos);
 
-        final icon = await _buildMarkerIcon(apt);
+        // 단지명 기반 가격 매칭 (exact → partial contains → normalized core)
+        final aptName = apt.kaptName.trim();
+        _MarkerPrice? mp = priceMap[aptName];
+        String? matchedApiName = mp != null ? aptName : null;
+        if (mp == null) {
+          for (final entry in priceMap.entries) {
+            if (entry.key.contains(aptName) || aptName.contains(entry.key)) {
+              mp = entry.value;
+              matchedApiName = entry.key;
+              break;
+            }
+          }
+        }
+        if (mp == null) {
+          final normApt = _normalizeAptName(aptName);
+          for (final entry in priceMap.entries) {
+            final normKey = _normalizeAptName(entry.key);
+            if (normKey == normApt ||
+                normKey.contains(normApt) ||
+                normApt.contains(normKey) ||
+                _sharesCoreSubstring(normApt, normKey)) {
+              mp = entry.value;
+              matchedApiName = entry.key;
+              break;
+            }
+          }
+        }
+
+        final icon = await _buildMarkerIcon(
+          apt,
+          priceLabel: mp?.priceLabel ?? '',
+          pyeongLabel: mp?.pyeongLabel ?? '',
+        );
         if (icon != null) {
           marker.setIcon(icon);
           marker.setAnchor(const NPoint(0.5, 1.0));
@@ -409,6 +514,7 @@ class _MapScreenState extends State<MapScreen> {
                 ? apt.bjdCode.substring(0, 5)
                 : apt.bjdCode,
             apt: apt,
+            apiName: matchedApiName,
           );
           return true;
         });
@@ -421,9 +527,11 @@ class _MapScreenState extends State<MapScreen> {
 
       // ── 2단계: addOverlayAll()로 한 번에 지도에 추가 ──────────────────────
       await _mapController!.addOverlayAll(markers.toSet());
-      _aptMarkers.addAll(markers);
+      for (final m in markers) {
+        _aptMarkerMap[m.info.id] = m;
+      }
 
-      debugPrint('[MapScreen] 마커 렌더링 완료 — ${_aptMarkers.length}개');
+      debugPrint('[MapScreen] 마커 렌더링 완료 — 신규 ${markers.length}개, 총 ${_aptMarkerMap.length}개');
     } catch (e) {
       debugPrint('[MapScreen] 마커 렌더링 오류: $e');
       if (mounted) {
@@ -550,11 +658,6 @@ class _MapScreenState extends State<MapScreen> {
     final pos = NLatLng(lat, lng);
     final placeName = place['place_name'];
 
-    // 지번주소가 없으면 도로명주소 사용
-    final address = (place['road_address_name'] as String).isNotEmpty
-        ? place['road_address_name']
-        : place['address_name'];
-
     // 카메라 이동
     await _mapController?.updateCamera(
       NCameraUpdate.scrollAndZoomTo(target: pos, zoom: 16),
@@ -575,33 +678,129 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── Property Info Sheet ──────────────────────────────────────────────────
 
+  /// 지역 실거래 데이터를 로드해 단지명 → 가격/평수 맵으로 반환.
+  Future<Map<String, _MarkerPrice>> _fetchDistrictPriceMap(
+    String lawdCd,
+  ) async {
+    try {
+      final svc = const PublicDataService();
+      final now = DateTime.now();
+
+      // 최근 12개월치 YYYYMM 리스트 (이번달 포함)
+      // 최근 3개월: 1000건 (정확도 우선), 이전 9개월: 200건 (거래 빈도 낮은 단지 보충용)
+      final ymds = List.generate(12, (i) {
+        final d = DateTime(now.year, now.month - i);
+        return '${d.year}${d.month.toString().padLeft(2, '0')}';
+      });
+
+      final results = await Future.wait(
+        ymds.asMap().entries.map((e) => svc.fetchAptTrades(
+          lawdCd: lawdCd,
+          dealYmd: e.value,
+          numOfRows: e.key < 3 ? 1000 : 200,
+        )),
+      );
+
+      for (int i = 0; i < ymds.length; i++) {
+        debugPrint('[MapScreen] priceMap ${ymds[i]}=${results[i].records.length}건');
+      }
+
+      // 최신 달부터 순서대로, 단지별로 가장 최근 달의 거래만 사용
+      // results[0]=이번달, results[1]=지난달, ... results[5]=6개월 전
+      final grouped = <String, List<AptTradeRecord>>{};
+      for (final data in results) {
+        // 이번 달 데이터를 단지별로 모음 (같은 달 내 여러 건 → 평균)
+        final monthGroup = <String, List<AptTradeRecord>>{};
+        for (final r in data.records) {
+          if (r.price <= 0) continue;
+          monthGroup.putIfAbsent(r.complexName.trim(), () => []).add(r);
+        }
+        // 아직 grouped에 없는 단지만 이번 달 데이터로 채움
+        for (final entry in monthGroup.entries) {
+          if (!grouped.containsKey(entry.key)) {
+            grouped[entry.key] = entry.value;
+          }
+        }
+      }
+
+      final map = <String, _MarkerPrice>{};
+      for (final entry in grouped.entries) {
+        final recs = entry.value;
+        final avgPrice = recs.map((r) => r.price).reduce((a, b) => a + b) ~/ recs.length;
+        final avgArea = recs.map((r) => r.area).reduce((a, b) => a + b) / recs.length;
+        map[entry.key] = _MarkerPrice(
+          priceLabel: _fmtPrice(avgPrice),
+          pyeongLabel: '${(avgArea / 3.30579).round()}평',
+        );
+      }
+      debugPrint('[MapScreen] priceMap 완료 — ${map.length}개 단지');
+      return map;
+    } catch (e) {
+      debugPrint('[MapScreen] priceMap 로드 실패: $e');
+      return {};
+    }
+  }
+
+  /// 만원 단위 → "N.M억" 표시 문자열.
+  String _fmtPrice(int priceManWon) {
+    final eok = priceManWon ~/ 10000;
+    final man = priceManWon % 10000;
+    if (eok > 0) {
+      final decimal = man ~/ 1000;
+      return decimal > 0 ? '$eok.$decimal억' : '$eok억';
+    }
+    return '${(priceManWon ~/ 100) * 100}만';
+  }
+
+  /// 실거래가 API 조회 연월 (YYYYMM). 이번 달 데이터가 없을 경우 호출부에서 폴백.
+  String _currentDealYmd() {
+    final now = DateTime.now();
+    return '${now.year}${now.month.toString().padLeft(2, '0')}';
+  }
+
   void _showPropertyInfoSheet(
     NLatLng pos,
     String label, {
     String lawdCd = '41135',
     ApartmentInfo? apt,
+    String? apiName,
   }) {
+    // 최근 본 매물 자동 저장 (로그인 상태일 때만, silently)
+    RecentViewService().addView(
+      id: apt?.kaptCode.isNotEmpty == true ? apt!.kaptCode : label,
+      name: apt?.kaptName ?? label,
+      address: apt?.kaptAddr ?? '',
+      lat: pos.latitude,
+      lng: pos.longitude,
+    );
+
     showModalBottomSheet(
       context: context,
       useRootNavigator: true,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => DraggableScrollableSheet(
-        initialChildSize: 0.4,
-        minChildSize: 0.3,
-        maxChildSize: 0.9,
-        expand: false,
-        snap: true,
-        snapSizes: const [0.4, 0.65, 0.9],
-        builder: (_, scrollCtrl) => _PropertyInfoSheet(
-          position: pos,
-          label: label,
-          lawdCd: lawdCd,
-          dealYmd: '202511',
-          scrollController: scrollCtrl,
-          apt: apt,
-        ),
-      ),
+      builder: (_) {
+        final sheetCtrl = DraggableScrollableController();
+        return DraggableScrollableSheet(
+          controller: sheetCtrl,
+          initialChildSize: 0.72,
+          minChildSize: 0.72,
+          maxChildSize: 1.0,
+          expand: false,
+          snap: true,
+          snapSizes: const [0.72, 1.0],
+          builder: (_, scrollCtrl) => _PropertyInfoSheet(
+            position: pos,
+            label: label,
+            lawdCd: lawdCd,
+            dealYmd: _currentDealYmd(),
+            scrollController: scrollCtrl,
+            sheetController: sheetCtrl,
+            apt: apt,
+            apiName: apiName,
+          ),
+        );
+      },
     );
   }
 
@@ -612,7 +811,14 @@ class _MapScreenState extends State<MapScreen> {
 
     try {
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) return;
+      if (!serviceEnabled) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('위치 서비스를 활성화해 주세요.')),
+          );
+        }
+        return;
+      }
 
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
@@ -624,9 +830,72 @@ class _MapScreenState extends State<MapScreen> {
         return;
       }
 
-      _mapController?.setLocationTrackingMode(NLocationTrackingMode.follow);
+      // 현재 위치 가져오기
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      ).timeout(const Duration(seconds: 10));
+
+      if (!mounted) return;
+
+      // 카메라 이동
+      await _mapController?.updateCamera(
+        NCameraUpdate.scrollAndZoomTo(
+          target: NLatLng(pos.latitude, pos.longitude),
+          zoom: 15,
+        ),
+      );
+
+      // 빨간 내 위치 점 표시
+      _mapController?.setLocationTrackingMode(NLocationTrackingMode.noFollow);
+      await _customizeLocationOverlay();
+    } catch (e) {
+      debugPrint('[MapScreen] 내 위치 이동 오류: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('현재 위치를 가져올 수 없습니다.')),
+        );
+      }
     } finally {
       if (mounted) setState(() => _isLocationLoading = false);
+    }
+  }
+
+  /// 위치 오버레이를 빨간 점으로 커스터마이즈
+  Future<void> _customizeLocationOverlay() async {
+    if (_mapController == null || !mounted) return;
+    final lo = _mapController!.getLocationOverlay();
+    lo.setCircleColor(const Color(0x26FF3B30)); // 반투명 빨간 정확도 원
+    lo.setCircleOutlineColor(const Color(0x55FF3B30));
+    lo.setCircleOutlineWidth(1.0);
+    try {
+      final icon = await NOverlayImage.fromWidget(
+        context: context,
+        size: const Size(22, 22),
+        widget: Container(
+          width: 22,
+          height: 22,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: const Color(0xFFFF3B30),
+            border: Border.all(color: Colors.white, width: 2.5),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x40000000),
+                blurRadius: 4,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (mounted) {
+        lo.setIcon(icon);
+        lo.setIconSize(const Size(22, 22));
+      }
+    } catch (e) {
+      debugPrint('[MapScreen] 위치 아이콘 커스텀 실패: $e');
     }
   }
 
@@ -886,7 +1155,7 @@ class _MapScreenState extends State<MapScreen> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 부동산 정보 바텀시트 — 하단 코드는 기존과 완벽히 동일합니다.
+// 부동산 정보 바텀시트 — 탭 3개: 단지정보 / 시세 / 임장노트
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _PropertyInfoSheet extends StatefulWidget {
@@ -896,32 +1165,122 @@ class _PropertyInfoSheet extends StatefulWidget {
     required this.lawdCd,
     required this.dealYmd,
     required this.scrollController,
+    required this.sheetController,
     this.apt,
+    this.apiName,
   });
 
   final NLatLng position;
   final String label, lawdCd, dealYmd;
   final ScrollController scrollController;
+  final DraggableScrollableController sheetController;
   final ApartmentInfo? apt;
+  final String? apiName; // priceMap 매칭으로 확인된 API 단지명
 
   @override
   State<_PropertyInfoSheet> createState() => _PropertyInfoSheetState();
 }
 
-class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
-  late final Future<AptTradeData> _dataFuture;
+class _PropertyInfoSheetState extends State<_PropertyInfoSheet>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabCtrl;
+  late final Future<List<AptTradeRecord>> _tradeFuture;
+  String? _apiName; // trade records에서 도출한 API 단지명 (aptNm)
+
+  // 임장노트 입력용
   final _reviewCtrl = TextEditingController();
   final _picker = ImagePicker();
-  final _service = HouseLogService();
   final _favService = FavoriteService();
   final List<XFile> _pendingMedia = [];
   bool _isSaving = false;
-  String _selectedUnit = '24평';
 
-  /// 찜 문서 ID: kaptCode 우선, 없으면 단지명을 사용.
   String get _favoriteId {
     final code = widget.apt?.kaptCode ?? '';
     return code.isNotEmpty ? code : widget.label;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _tabCtrl = TabController(length: 3, vsync: this);
+    // priceMap에서 이미 매칭된 API 이름이 있으면 즉시 사용
+    _apiName = widget.apiName;
+    _tradeFuture = _loadTradeDataCached().then((records) {
+      // apiName이 없을 때만 records에서 도출 시도
+      if (_apiName == null) {
+        final kaptName = widget.apt?.kaptName.trim() ?? widget.label;
+        final resolved = _resolveApiName(records, kaptName);
+        if (resolved != null && mounted) {
+          setState(() => _apiName = resolved);
+        }
+      }
+      return records;
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.sheetController.dispose();
+    _tabCtrl.dispose();
+    _reviewCtrl.dispose();
+    super.dispose();
+  }
+
+  String _todayStr() {
+    final now = DateTime.now();
+    return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+  }
+
+  /// 시세 데이터 로드: Firestore 캐시(오늘 날짜) → 없으면 API 호출 후 저장.
+  Future<List<AptTradeRecord>> _loadTradeDataCached() async {
+    final db = FirebaseFirestore.instance;
+    final cacheRef = db.collection('apt_price_cache').doc(widget.lawdCd);
+    final today = _todayStr();
+
+    // ── 캐시 확인 ────────────────────────────────────────────────────────────
+    try {
+      final snap = await cacheRef.get();
+      if (snap.exists) {
+        final data = snap.data()!;
+        if (data['cachedDate'] == today) {
+          final rawList =
+              List<Map<String, dynamic>>.from(data['records'] ?? []);
+          debugPrint('[Sheet] 캐시 히트 — ${rawList.length}건');
+          return rawList.map((m) => AptTradeRecord.fromMap(m)).toList();
+        }
+      }
+    } catch (e) {
+      debugPrint('[Sheet] 캐시 읽기 실패: $e');
+    }
+
+    // ── API 호출 ─────────────────────────────────────────────────────────────
+    final svc = const PublicDataService();
+    AptTradeData data = await svc.fetchAptTrades(
+      lawdCd: widget.lawdCd,
+      dealYmd: widget.dealYmd,
+    );
+
+    if (data.records.isEmpty) {
+      final now = DateTime.now();
+      final prev = DateTime(now.year, now.month - 1);
+      data = await svc.fetchAptTrades(
+        lawdCd: widget.lawdCd,
+        dealYmd: '${prev.year}${prev.month.toString().padLeft(2, '0')}',
+      );
+    }
+
+    // ── 캐시 저장 (실패해도 무시) ──────────────────────────────────────────────
+    try {
+      await cacheRef.set({
+        'cachedDate': today,
+        'records': data.records.map((r) => r.toMap()).toList(),
+        'fetchedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      debugPrint('[Sheet] 캐시 저장 실패: $e');
+    }
+
+    return data.records;
   }
 
   Future<void> _toggleFavorite(bool isFav) async {
@@ -950,25 +1309,13 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('오류: $e'), margin: const EdgeInsets.all(16)),
+          SnackBar(
+            content: Text('오류: $e'),
+            margin: const EdgeInsets.all(16),
+          ),
         );
       }
     }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _dataFuture = const PublicDataService().fetchAptTrades(
-      lawdCd: widget.lawdCd,
-      dealYmd: widget.dealYmd,
-    );
-  }
-
-  @override
-  void dispose() {
-    _reviewCtrl.dispose();
-    super.dispose();
   }
 
   bool get _canSubmit =>
@@ -978,24 +1325,92 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
   Future<void> _pickImages() async {
     if (_isSaving) return;
     final picked = await _picker.pickMultiImage(imageQuality: 85);
-    if (picked.isNotEmpty && mounted)
-      setState(() => _pendingMedia.addAll(picked));
+    if (picked.isNotEmpty && mounted) setState(() => _pendingMedia.addAll(picked));
+  }
+
+  // ── 주소 파싱 헬퍼 (imjang_records 저장용) ────────────────────────────────
+
+  static String _parseSido(String address) {
+    if (address.isEmpty) return '';
+    final p = address.split(' ').first;
+    if (p.contains('서울')) return '서울';
+    if (p.contains('경기')) return '경기';
+    if (p.contains('인천')) return '인천';
+    if (p.contains('부산')) return '부산';
+    if (p.contains('대구')) return '대구';
+    if (p.contains('광주')) return '광주';
+    if (p.contains('대전')) return '대전';
+    if (p.contains('울산')) return '울산';
+    if (p.contains('세종')) return '세종';
+    if (p.contains('강원')) return '강원';
+    if (p.contains('충북') || (p.contains('충청') && p.contains('북'))) return '충북';
+    if (p.contains('충남') || (p.contains('충청') && p.contains('남'))) return '충남';
+    if (p.contains('전북') || (p.contains('전라') && p.contains('북'))) return '전북';
+    if (p.contains('전남') || (p.contains('전라') && p.contains('남'))) return '전남';
+    if (p.contains('경북') || (p.contains('경상') && p.contains('북'))) return '경북';
+    if (p.contains('경남') || (p.contains('경상') && p.contains('남'))) return '경남';
+    if (p.contains('제주')) return '제주';
+    return p;
+  }
+
+  static String _parseSigungu(String address) {
+    final parts = address.split(' ');
+    if (parts.length < 2) return '';
+    final p1 = parts[1];
+    if (parts.length >= 3) {
+      final p2 = parts[2];
+      if ((p1.endsWith('시') || p1.endsWith('군')) && p2.endsWith('구')) {
+        return '$p1 $p2';
+      }
+    }
+    return p1;
+  }
+
+  static String _parseEupmyeondong(String address) {
+    final parts = address.split(' ');
+    for (int i = parts.length - 1; i >= 0; i--) {
+      final p = parts[i];
+      if (p.endsWith('동') || p.endsWith('읍') || p.endsWith('면')) return p;
+    }
+    return '';
+  }
+
+  static String _deriveRegion(String address) {
+    if (address.contains('서울')) return '서울';
+    if (address.contains('경기') || address.contains('인천')) return '경기/인천';
+    if (address.contains('부산') || address.contains('경남')) return '부산/경남';
+    return '지방';
   }
 
   Future<void> _submit() async {
     if (!_canSubmit) return;
-    if (!_service.isAuthenticated) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('로그인 후 임장 기록을 남길 수 있습니다.')));
+    if (FirebaseAuth.instance.currentUser == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('로그인 후 임장 기록을 남길 수 있습니다.')),
+      );
       return;
     }
     setState(() => _isSaving = true);
     try {
-      await _service.saveLog(
-        buildingId: HouseLogService.buildingId(widget.label),
-        text: _reviewCtrl.text.trim(),
-        imageFiles: _pendingMedia.map((f) => File(f.path)).toList(),
+      final imageFiles = _pendingMedia.map((f) => File(f.path)).toList();
+      final reviewText = _reviewCtrl.text.trim();
+      final address = widget.apt?.kaptAddr.isNotEmpty == true
+          ? widget.apt!.kaptAddr
+          : widget.label;
+      final bId = HouseLogService.buildingId(widget.label);
+
+      await ImjangService().saveImjangRecord(
+        title: widget.label,
+        address: address,
+        region: _deriveRegion(address),
+        latitude: widget.position.latitude,
+        longitude: widget.position.longitude,
+        review: reviewText,
+        mediaFiles: imageFiles,
+        sido: _parseSido(address),
+        sigungu: _parseSigungu(address),
+        eupmyeondong: _parseEupmyeondong(address),
+        buildingId: bId,
       );
       if (mounted) {
         setState(() {
@@ -1003,9 +1418,9 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
           _pendingMedia.clear();
           _isSaving = false;
         });
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('임장 기록이 등록되었습니다.')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('임장 기록이 등록되었습니다.')),
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -1022,80 +1437,102 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
 
   @override
   Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.sheetController,
+      builder: (ctx, _) => _buildSheet(ctx),
+    );
+  }
+
+  Widget _buildSheet(BuildContext context) {
+    final isFullScreen = widget.sheetController.isAttached &&
+        widget.sheetController.size >= 0.99;
+    final topPadding = isFullScreen ? MediaQuery.of(context).padding.top : 0.0;
     return Container(
       clipBehavior: Clip.antiAlias,
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: _kPageBg,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius: isFullScreen
+            ? BorderRadius.zero
+            : const BorderRadius.vertical(top: Radius.circular(24)),
       ),
+      padding: EdgeInsets.only(top: topPadding),
       child: Column(
         children: [
-          Container(
-            margin: const EdgeInsets.only(top: 12, bottom: 8),
-            width: 36,
-            height: 4,
-            decoration: BoxDecoration(
-              color: Colors.grey.shade300,
-              borderRadius: BorderRadius.circular(2),
+          // 드래그 핸들: scrollController를 연결한 ListView
+          // → DraggableScrollableSheet가 이 scroll 이벤트로 시트 크기 제어
+          SizedBox(
+            height: 32,
+            child: ListView(
+              controller: widget.scrollController,
+              physics: const AlwaysScrollableScrollPhysics(),
+              children: [
+                Center(
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(vertical: 14),
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
+          // 단지 헤더
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: _buildComplexHeader(),
+          ),
+          // 탭바
+          TabBar(
+            controller: _tabCtrl,
+            labelColor: kPrimary,
+            unselectedLabelColor: kTextMuted,
+            indicatorColor: kPrimary,
+            indicatorWeight: 2.5,
+            labelStyle: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+            ),
+            unselectedLabelStyle: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+            ),
+            tabs: const [
+              Tab(text: '단지정보'),
+              Tab(text: '시세'),
+              Tab(text: '임장노트'),
+            ],
+          ),
+          const Divider(height: 1, thickness: 1),
+          // 탭 콘텐츠
           Expanded(
-            child: CustomScrollView(
-              controller: widget.scrollController,
-              slivers: [
-                SliverPadding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  sliver: SliverList(
-                    delegate: SliverChildListDelegate([
-                      const SizedBox(height: 4),
-                      _buildComplexHeader(),
-                      const SizedBox(height: 12),
-                      _buildQuickInputBox(),
-                      const SizedBox(height: 16),
-                      _buildHistorySection(),
-                      const SizedBox(height: 16),
-                      _buildUnitTabs(),
-                      const SizedBox(height: 12),
-                      const Text(
-                        '시세 & 투자 지표',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      _PriceOverviewCard(data: _kUnitDataMap[_selectedUnit]!),
-                      const SizedBox(height: 12),
-                      _PriceTrendChartCard(data: _kUnitDataMap[_selectedUnit]!),
-                      const SizedBox(height: 16),
-                      const Text(
-                        '단지 정보',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const _BuildingInfoCard(),
-                      const SizedBox(height: 16),
-                      const Text(
-                        '학군 & 입지',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const _SchoolLocationCard(),
-                      const SizedBox(height: 16),
-                      const _DongBreakdownCard(),
-                      const SizedBox(height: 16),
-                      _buildTradeSection(),
-                      SizedBox(
-                        height: MediaQuery.of(context).padding.bottom + 24,
-                      ),
-                    ]),
-                  ),
+            child: TabBarView(
+              controller: _tabCtrl,
+              children: [
+                _ComplexInfoTab(
+                  apt: widget.apt,
+                  label: widget.label,
+                  tradeFuture: _tradeFuture,
+                  apiName: _apiName,
+                ),
+                _PriceTab(
+                  lawdCd: widget.lawdCd,
+                  aptName: _apiName ?? widget.apt?.kaptName.trim() ?? widget.label,
+                ),
+                _ImjangNotesTab(
+                  label: widget.label,
+                  reviewCtrl: _reviewCtrl,
+                  pendingMedia: _pendingMedia,
+                  isSaving: _isSaving,
+                  canSubmit: _canSubmit,
+                  onPickImages: _pickImages,
+                  onSubmit: _submit,
+                  onRemoveMedia: (i) =>
+                      setState(() => _pendingMedia.removeAt(i)),
+                  onTextChanged: () => setState(() {}),
                 ),
               ],
             ),
@@ -1106,74 +1543,1052 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
   }
 
   Widget _buildComplexHeader() {
-    return Column(
+    return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: kPrimary.withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: const Text(
-                '아파트',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  color: kPrimary,
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                widget.label,
-                style: const TextStyle(fontSize: 11, color: kTextMuted),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            StreamBuilder<bool>(
-              stream: _favService.isFavoriteStream(_favoriteId),
-              builder: (context, snap) {
-                final isFav = snap.data ?? false;
-                return GestureDetector(
-                  onTap: () => _toggleFavorite(isFav),
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 8),
-                    child: Icon(
-                      isFav
-                          ? Icons.favorite_rounded
-                          : Icons.favorite_outline_rounded,
-                      color: isFav
-                          ? const Color(0xFFE53935)
-                          : Colors.grey.shade400,
-                      size: 26,
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: kPrimary.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Text(
+                      '아파트',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: kPrimary,
+                      ),
                     ),
                   ),
-                );
-              },
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Text(
-          widget.label,
-          style: const TextStyle(
-            fontSize: 26,
-            fontWeight: FontWeight.w800,
-            color: kTextDark,
-            letterSpacing: -0.9,
-            height: 1.1,
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      widget.apt?.kaptAddr ?? '',
+                      style: const TextStyle(fontSize: 11, color: kTextMuted),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                widget.label,
+                style: const TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                  color: kTextDark,
+                  letterSpacing: -0.7,
+                  height: 1.1,
+                ),
+              ),
+            ],
           ),
+        ),
+        StreamBuilder<bool>(
+          stream: _favService.isFavoriteStream(_favoriteId),
+          builder: (ctx, snap) {
+            final isFav = snap.data ?? false;
+            return GestureDetector(
+              onTap: () => _toggleFavorite(isFav),
+              child: Padding(
+                padding: const EdgeInsets.only(left: 8, top: 4),
+                child: Icon(
+                  isFav
+                      ? Icons.favorite_rounded
+                      : Icons.favorite_outline_rounded,
+                  color: isFav
+                      ? const Color(0xFFE53935)
+                      : Colors.grey.shade400,
+                  size: 28,
+                ),
+              ),
+            );
+          },
         ),
       ],
     );
   }
+}
 
-  Widget _buildQuickInputBox() {
+// ─────────────────────────────────────────────────────────────────────────────
+// 탭 1: 단지정보
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ComplexInfoTab extends StatelessWidget {
+  const _ComplexInfoTab({
+    required this.apt,
+    required this.label,
+    required this.tradeFuture,
+    this.apiName,
+  });
+
+  final ApartmentInfo? apt;
+  final String label;
+  final Future<List<AptTradeRecord>> tradeFuture;
+  final String? apiName;
+
+  static String _parkingLabel(int total, int households) {
+    if (households > 0) {
+      final perUnit = total / households;
+      return '$total대 (세대당 ${perUnit.toStringAsFixed(2)}대)';
+    }
+    return '$total대';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final a = apt; // null-safe 로컬 참조
+    return FutureBuilder<List<AptTradeRecord>>(
+      future: tradeFuture,
+      builder: (ctx, snap) {
+        // 건축년도 추출 (실거래 데이터 기반)
+        int buildYear = 0;
+        if (snap.hasData) {
+          final years = snap.data!
+              .map((r) => r.buildYear)
+              .where((y) => y > 0)
+              .toList();
+          if (years.isNotEmpty) {
+            final freq = <int, int>{};
+            for (final y in years) {
+              freq[y] = (freq[y] ?? 0) + 1;
+            }
+            buildYear = freq.entries
+                .reduce((best, e) => e.value >= best.value ? e : best)
+                .key;
+          }
+        }
+
+        // 순서: 단지명, 건축년도, 세대수, 주차대수, 난방, 사용승인일, 저/최고층, 건설사, 도로명주소, 지번주소
+        final rows = <Widget>[
+          _InfoRow(label: '단지명', value: apiName ?? a?.kaptName ?? label),
+          if (snap.connectionState == ConnectionState.waiting)
+            const _LoadingRow()
+          else if (buildYear > 0)
+            _InfoRow(label: '건축년도', value: '$buildYear년'),
+          if (a != null && a.totalHouseholds > 0)
+            _InfoRow(
+              label: '세대수',
+              value: '${a.totalHouseholds}세대'
+                  '${a.dongCount > 0 ? ' (${a.dongCount}개동)' : ''}',
+            ),
+          if (a != null && a.totalParkingCount > 0)
+            _InfoRow(
+              label: '주차대수',
+              value: _parkingLabel(a.totalParkingCount, a.totalHouseholds),
+            ),
+          if (a != null && a.heatingType.isNotEmpty)
+            _InfoRow(label: '난방', value: a.heatingType),
+          if (a != null && a.approvalDate.isNotEmpty)
+            _InfoRow(label: '사용승인일', value: a.approvalDate),
+          if (a != null && (a.minFloor > 0 || a.maxFloor > 0))
+            _InfoRow(
+              label: '저/최고층',
+              value: '${a.minFloor < 1 ? 1 : a.minFloor}층 / ${a.maxFloor < 1 ? 1 : a.maxFloor}층',
+            ),
+          if (a != null && a.builder.isNotEmpty)
+            _InfoRow(label: '건설사', value: a.builder),
+          if (a != null && a.roadAddr.isNotEmpty)
+            _InfoRow(label: '도로명주소', value: a.roadAddr),
+          _InfoRow(
+            label: '지번주소',
+            value: a?.kaptAddr.isNotEmpty == true ? a!.kaptAddr : '-',
+          ),
+        ];
+
+        return SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(
+            16, 16, 16, MediaQuery.of(context).padding.bottom + 16,
+          ),
+          child: _InfoCard(children: rows),
+        );
+      },
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 탭 2: 시세
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _PriceTab extends StatefulWidget {
+  const _PriceTab({required this.lawdCd, required this.aptName});
+  final String lawdCd;
+  final String aptName;
+
+  @override
+  State<_PriceTab> createState() => _PriceTabState();
+}
+
+class _PriceTabState extends State<_PriceTab> {
+  int _years = 1;
+  int? _selectedPyeong;
+
+  // yyyymm → 전체 지역 실거래 레코드 (원본)
+  final Map<String, List<AptTradeRecord>> _rawCache = {};
+  // yyyymm → 필터링된 단지 레코드
+  final Map<String, List<AptTradeRecord>> _cache = {};
+
+  bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadYears(1);
+  }
+
+  @override
+  void didUpdateWidget(_PriceTab old) {
+    super.didUpdateWidget(old);
+    // aptName이 나중에 resolve되면 기존 원본 캐시를 재필터링
+    if (old.aptName != widget.aptName && widget.aptName.isNotEmpty) {
+      setState(() {
+        for (final key in _rawCache.keys) {
+          _cache[key] = _filter(_rawCache[key]!);
+        }
+      });
+    }
+  }
+
+  Future<void> _loadYears(int targetYears) async {
+    if (_isLoading) return;
+    setState(() {
+      _isLoading = true;
+    });
+
+    final now = DateTime.now();
+    final allMonths = <String>[];
+    for (int i = 0; i < targetYears * 12; i++) {
+      final d = DateTime(now.year, now.month - i);
+      allMonths.add('${d.year}${d.month.toString().padLeft(2, '0')}');
+    }
+    final toLoad = allMonths.where((m) => !_cache.containsKey(m)).toList();
+
+    for (int i = 0; i < toLoad.length; i += 6) {
+      final batch = toLoad.sublist(i, min(i + 6, toLoad.length));
+      await Future.wait(batch.map(_fetchMonth));
+      if (mounted) setState(() {}); // 배치마다 점진적 업데이트
+    }
+
+    if (mounted) setState(() {
+      _isLoading = false;
+      _years = targetYears;
+    });
+  }
+
+  Future<void> _fetchMonth(String yyyymm) async {
+    final db = FirebaseFirestore.instance;
+    final cacheKey = '${widget.lawdCd}_$yyyymm';
+    final cacheRef = db.collection('apt_price_cache_v2').doc(cacheKey);
+    List<AptTradeRecord>? allRecords;
+
+    // 최근 2개월(이번달·지난달)은 당일 캐시가 아니면 재조회,
+    // 그 이전 달은 Firestore 캐시 있으면 API 호출 없이 그대로 사용.
+    final now = DateTime.now();
+    final prevMonth = DateTime(now.year, now.month - 1);
+    final recentKeys = {
+      '${now.year}${now.month.toString().padLeft(2, '0')}',
+      '${prevMonth.year}${prevMonth.month.toString().padLeft(2, '0')}',
+    };
+    final isRecent = recentKeys.contains(yyyymm);
+
+    // 1) Firestore 캐시 확인
+    try {
+      final snap = await cacheRef.get();
+      if (snap.exists) {
+        final data = snap.data()!;
+        bool useCache;
+
+        if (isRecent) {
+          // 최근 달: 오늘 캐시된 것만 유효 (당일 중복 API 호출 방지)
+          final fetchedAt = data['fetchedAt'] as Timestamp?;
+          if (fetchedAt != null) {
+            final fd = fetchedAt.toDate().toLocal();
+            useCache = fd.year == now.year &&
+                fd.month == now.month &&
+                fd.day == now.day;
+          } else {
+            useCache = false; // 날짜 없는 구버전 캐시 → 재조회
+          }
+        } else {
+          // 과거 달: 캐시가 있으면 무조건 사용
+          useCache = true;
+        }
+
+        if (useCache) {
+          final rawList =
+              List<Map<String, dynamic>>.from(data['records'] ?? []);
+          allRecords = rawList.map(AptTradeRecord.fromMap).toList();
+        }
+      }
+    } catch (_) {}
+
+    // 2) 캐시 없거나 재조회 필요 시 API 호출
+    if (allRecords == null) {
+      try {
+        final data = await const PublicDataService().fetchAptTrades(
+          lawdCd: widget.lawdCd,
+          dealYmd: yyyymm,
+          numOfRows: 1000,
+        );
+        allRecords = data.records;
+        // 중복 제거 후 Firestore 저장 (set으로 덮어쓰기)
+        try {
+          final seen = <String>{};
+          final deduped = allRecords.where((r) {
+            final key =
+                '${r.complexName}_${r.dealYear}_${r.dealMonth}_${r.dealDay}_${r.floor}_${r.area}';
+            return seen.add(key);
+          }).toList();
+          await cacheRef.set({
+            'records': deduped.map((r) => r.toMap()).toList(),
+            'fetchedAt': FieldValue.serverTimestamp(),
+          });
+        } catch (_) {}
+      } catch (_) {
+        allRecords = [];
+      }
+    }
+
+    _rawCache[yyyymm] = allRecords;
+    _cache[yyyymm] = _filter(allRecords);
+  }
+
+  List<AptTradeRecord> _filter(List<AptTradeRecord> records) {
+    final name = widget.aptName.trim();
+    if (name.isEmpty) return records;
+    final filtered = records.where((r) {
+      final rn = r.complexName.trim();
+      return rn == name || rn.contains(name) || name.contains(rn);
+    }).toList();
+    return filtered.isNotEmpty ? filtered : [];
+  }
+
+  List<AptTradeRecord> get _allFiltered {
+    final all = _cache.values.expand((l) => l).toList();
+    all.sort((a, b) {
+      final da = DateTime(a.dealYear, a.dealMonth, max(a.dealDay, 1));
+      final db2 = DateTime(b.dealYear, b.dealMonth, max(b.dealDay, 1));
+      return db2.compareTo(da);
+    });
+    return all;
+  }
+
+  List<int> get _pyeongList {
+    final freq = <int, int>{};
+    for (final r in _allFiltered) {
+      final p = (r.area / 3.30579).round();
+      if (p > 0) freq[p] = (freq[p] ?? 0) + 1;
+    }
+    return freq.keys.toList()..sort();
+  }
+
+  int? get _mostCommonPyeong {
+    final freq = <int, int>{};
+    for (final r in _allFiltered) {
+      final p = (r.area / 3.30579).round();
+      if (p > 0) freq[p] = (freq[p] ?? 0) + 1;
+    }
+    if (freq.isEmpty) return null;
+    return freq.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+  }
+
+  List<AptTradeRecord> get _pyeongFiltered {
+    final p = _selectedPyeong;
+    if (p == null) return _allFiltered;
+    return _allFiltered
+        .where((r) => (r.area / 3.30579).round() == p)
+        .toList();
+  }
+
+  List<MapEntry<DateTime, int>> get _chartPoints {
+    final monthMap = <String, List<int>>{};
+    for (final r in _pyeongFiltered) {
+      if (r.price <= 0) continue;
+      final key =
+          '${r.dealYear}${r.dealMonth.toString().padLeft(2, '0')}';
+      monthMap.putIfAbsent(key, () => []).add(r.price);
+    }
+    final pts = monthMap.entries.map((e) {
+      final avg = e.value.reduce((a, b) => a + b) ~/ e.value.length;
+      return MapEntry(
+        DateTime(
+          int.parse(e.key.substring(0, 4)),
+          int.parse(e.key.substring(4)),
+        ),
+        avg,
+      );
+    }).toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    return pts;
+  }
+
+  /// 개별 거래 건 좌표 목록 (그래프 스캐터 점 용)
+  List<MapEntry<DateTime, int>> get _rawChartDots {
+    return _pyeongFiltered
+        .where((r) => r.price > 0)
+        .map((r) => MapEntry(
+              DateTime(r.dealYear, r.dealMonth, r.dealDay > 0 ? r.dealDay : 1),
+              r.price,
+            ))
+        .toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pyeongs = _pyeongList;
+    final filtered = _pyeongFiltered;
+    final chartPts = _chartPoints;
+    final rawDots = _rawChartDots;
+
+    // 가장 많이 거래된 평형 자동 선택
+    if (_selectedPyeong == null && pyeongs.isNotEmpty) {
+      final auto = _mostCommonPyeong;
+      if (auto != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _selectedPyeong == null) {
+            setState(() => _selectedPyeong = auto);
+          }
+        });
+      }
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // ── 필터 행: 왼쪽 = 기간(연도), 오른쪽 = 평형 ─────────────────────────
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+          child: Row(
+            children: [
+              // 기간 드롭다운 (왼쪽)
+              _FilterDropdown<int>(
+                value: _years,
+                hint: '기간',
+                items: const [1, 3, 5, 10],
+                label: (y) => '$y년',
+                enabled: !_isLoading,
+                onChanged: (v) => _loadYears(v),
+              ),
+              const SizedBox(width: 10),
+              // 평형 드롭다운 (오른쪽)
+              _FilterDropdown<int?>(
+                value: _selectedPyeong,
+                hint: '평형',
+                items: [null, ...pyeongs],
+                label: (p) => p == null ? '전체' : '$p평',
+                enabled: pyeongs.isNotEmpty,
+                onChanged: (v) => setState(() => _selectedPyeong = v),
+              ),
+            ],
+          ),
+        ),
+
+        // ── 로딩 바 ─────────────────────────────────────────────────────────
+        if (_isLoading)
+          const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: LinearProgressIndicator(minHeight: 2),
+          )
+        else
+          const SizedBox(height: 6),
+
+        // ── 시세 그래프 ──────────────────────────────────────────────────────
+        if (chartPts.length >= 2) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+            child: Text(
+              '월평균 실거래가'
+              '${_selectedPyeong != null ? ' ($_selectedPyeong평)' : ''}',
+              style: const TextStyle(
+                fontSize: 12,
+                color: kTextMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          SizedBox(
+            height: 180,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(4, 4, 12, 4),
+              child: CustomPaint(
+                painter: _PriceChartPainter(
+                  monthlyAvgs: chartPts,
+                  rawDots: rawDots,
+                ),
+                size: Size.infinite,
+              ),
+            ),
+          ),
+        ] else if (!_isLoading && pyeongs.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 16),
+            child: Center(
+              child: Text(
+                '실거래 데이터가 없습니다.',
+                style: TextStyle(color: kTextMuted, fontSize: 13),
+              ),
+            ),
+          ),
+
+        // ── 실거래 내역 섹션 헤더 ────────────────────────────────────────────
+        const Padding(
+          padding: EdgeInsets.fromLTRB(14, 14, 14, 6),
+          child: Row(
+            children: [
+              Text(
+                '실거래 내역',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: kTextMuted,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1, thickness: 0.5, indent: 14, endIndent: 14),
+
+        // ── 거래 목록 ────────────────────────────────────────────────────────
+        Expanded(
+          child: filtered.isEmpty
+              ? Center(
+                  child: _isLoading
+                      ? const CircularProgressIndicator(strokeWidth: 2)
+                      : const Text(
+                          '거래 내역이 없습니다.',
+                          style: TextStyle(color: kTextMuted, fontSize: 13),
+                        ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 12, 32),
+                  itemCount: filtered.length,
+                  itemBuilder: (_, i) => _TradeCard(record: filtered[i]),
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 시세 그래프 페인터 — 네이버 부동산 스타일
+//   · rawDots   : 개별 거래 건 (작은 반투명 점)
+//   · monthlyAvgs: 월평균 (굵은 선 + 채우기 + 강조 점)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _PriceChartPainter extends CustomPainter {
+  const _PriceChartPainter({
+    required this.monthlyAvgs,
+    required this.rawDots,
+  });
+
+  final List<MapEntry<DateTime, int>> monthlyAvgs; // 월별 평균 (선)
+  final List<MapEntry<DateTime, int>> rawDots;     // 개별 거래 (점)
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (monthlyAvgs.length < 2) return;
+
+    const leftPad = 58.0;
+    const rightPad = 8.0;
+    const topPad = 12.0;
+    const bottomPad = 28.0;
+
+    final chartW = size.width - leftPad - rightPad;
+    final chartH = size.height - topPad - bottomPad;
+
+    // ── 전체 가격 범위 (rawDots + monthlyAvgs 합산) ─────────────────────────
+    final allPrices = [
+      ...monthlyAvgs.map((e) => e.value.toDouble()),
+      ...rawDots.map((e) => e.value.toDouble()),
+    ];
+    final minP = allPrices.reduce(min);
+    final maxP = allPrices.reduce(max);
+    final rawRange = maxP - minP;
+    // Y 범위에 여백 추가 (상하 10%)
+    final padP = rawRange * 0.10;
+    final yMin = (minP - padP).clamp(0, double.infinity);
+    final yMax = maxP + padP;
+    final range = (yMax - yMin).clamp(1, double.infinity);
+
+    // ── 날짜 범위 (시간 기반 X축) ───────────────────────────────────────────
+    final allDates = [
+      ...monthlyAvgs.map((e) => e.key),
+      ...rawDots.map((e) => e.key),
+    ];
+    final minDate = allDates.reduce((a, b) => a.isBefore(b) ? a : b);
+    final maxDate = allDates.reduce((a, b) => a.isAfter(b) ? a : b);
+    final totalMs =
+        (maxDate.millisecondsSinceEpoch - minDate.millisecondsSinceEpoch)
+            .toDouble()
+            .clamp(1, double.infinity);
+
+    // ── 좌표 변환 헬퍼 ─────────────────────────────────────────────────────
+    Offset toOffset(DateTime date, int price) {
+      final x = leftPad +
+          chartW *
+              (date.millisecondsSinceEpoch - minDate.millisecondsSinceEpoch) /
+              totalMs;
+      final y = topPad + chartH * (1 - (price - yMin) / range);
+      return Offset(x, y);
+    }
+
+    final textStyle = TextStyle(color: Colors.grey.shade500, fontSize: 9.5);
+
+    // ── 수평 그리드 ────────────────────────────────────────────────────────
+    final gridPaint = Paint()
+      ..color = Colors.grey.shade100
+      ..strokeWidth = 1;
+    for (int i = 0; i <= 4; i++) {
+      final y = topPad + chartH * i / 4;
+      canvas.drawLine(
+          Offset(leftPad, y), Offset(size.width - rightPad, y), gridPaint);
+    }
+
+    // ── Y 축 레이블 ────────────────────────────────────────────────────────
+    for (int i = 0; i <= 4; i++) {
+      final price = yMin + range * (4 - i) / 4;
+      final y = topPad + chartH * i / 4;
+      final label = _priceLabel(price.round());
+      final tp = TextPainter(
+        text: TextSpan(text: label, style: textStyle),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: leftPad - 6);
+      tp.paint(canvas, Offset(leftPad - tp.width - 5, y - tp.height / 2));
+    }
+
+    // ── X 축 월 레이블 ─────────────────────────────────────────────────────
+    final n = monthlyAvgs.length;
+    final step = n > 36 ? 12 : (n > 18 ? 6 : (n > 8 ? 3 : 2));
+    for (int i = 0; i < n; i += step) {
+      final d = monthlyAvgs[i].key;
+      final o = toOffset(d, yMin.round());
+      final label =
+          "${d.year.toString().substring(2)}.${d.month.toString().padLeft(2, '0')}";
+      final tp = TextPainter(
+        text: TextSpan(text: label, style: textStyle),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: 44);
+      tp.paint(canvas, Offset(o.dx - tp.width / 2, size.height - bottomPad + 6));
+    }
+
+    // ── 개별 거래 점 (rawDots) ─────────────────────────────────────────────
+    // 네이버 부동산처럼 작고 반투명한 회색 점으로 실거래를 표시
+    final rawPaint = Paint()
+      ..color = const Color(0xFF9DB1CC).withValues(alpha: 0.55)
+      ..style = PaintingStyle.fill;
+    for (final dot in rawDots) {
+      final o = toOffset(dot.key, dot.value);
+      canvas.drawCircle(o, 2.5, rawPaint);
+    }
+
+    // ── 월평균 라인 ────────────────────────────────────────────────────────
+    final avgOffsets = monthlyAvgs.map((e) => toOffset(e.key, e.value)).toList();
+
+    // 채우기 영역 (그라디언트)
+    final fillPath = Path()
+      ..moveTo(avgOffsets.first.dx, avgOffsets.first.dy);
+    for (int i = 1; i < avgOffsets.length; i++) {
+      fillPath.lineTo(avgOffsets[i].dx, avgOffsets[i].dy);
+    }
+    fillPath
+      ..lineTo(avgOffsets.last.dx, topPad + chartH)
+      ..lineTo(avgOffsets.first.dx, topPad + chartH)
+      ..close();
+    canvas.drawPath(
+      fillPath,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            kSecondary.withValues(alpha: 0.20),
+            kSecondary.withValues(alpha: 0.0),
+          ],
+        ).createShader(Rect.fromLTWH(leftPad, topPad, chartW, chartH)),
+    );
+
+    // 평균 선
+    final linePath = Path()
+      ..moveTo(avgOffsets.first.dx, avgOffsets.first.dy);
+    for (int i = 1; i < avgOffsets.length; i++) {
+      linePath.lineTo(avgOffsets[i].dx, avgOffsets[i].dy);
+    }
+    canvas.drawPath(
+      linePath,
+      Paint()
+        ..color = kSecondary
+        ..strokeWidth = 2.0
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round,
+    );
+
+    // 월평균 점 (흰 테두리 + 파란 중심)
+    for (final o in avgOffsets) {
+      canvas.drawCircle(o, 4.0, Paint()..color = Colors.white);
+      canvas.drawCircle(o, 2.8, Paint()..color = kSecondary);
+    }
+  }
+
+  String _priceLabel(int price) {
+    final eok = price ~/ 10000;
+    final man = (price % 10000 + 500) ~/ 1000; // 천만 단위 반올림
+    if (eok > 0 && man > 0) return '$eok억\n${man}천';
+    if (eok > 0) return '$eok억';
+    return '${(price + 500) ~/ 1000}천만';
+  }
+
+  @override
+  bool shouldRepaint(_PriceChartPainter old) =>
+      old.monthlyAvgs != monthlyAvgs || old.rawDots != rawDots;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 시세 탭 필터 드롭다운 (연도/평형 공용)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _FilterDropdown<T> extends StatelessWidget {
+  const _FilterDropdown({
+    required this.value,
+    required this.hint,
+    required this.items,
+    required this.label,
+    required this.onChanged,
+    this.enabled = true,
+  });
+
+  final T value;
+  final String hint;
+  final List<T> items;
+  final String Function(T) label;
+  final void Function(T) onChanged;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 36,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: kBorderColor),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<T>(
+          value: value,
+          hint: Text(hint,
+              style: const TextStyle(fontSize: 13, color: kTextMuted)),
+          isDense: true,
+          icon: const Icon(Icons.keyboard_arrow_down_rounded,
+              size: 18, color: kTextMuted),
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: kTextDark,
+          ),
+          items: items
+              .map((v) => DropdownMenuItem<T>(
+                    value: v,
+                    child: Text(label(v)),
+                  ))
+              .toList(),
+          onChanged: enabled ? (T? v) { if (v != null || null is T) onChanged(v as T); } : null,
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 거래 카드
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _TradeCard extends StatelessWidget {
+  const _TradeCard({required this.record});
+  final AptTradeRecord record;
+
+  @override
+  Widget build(BuildContext context) {
+    final pyeong = (record.area / 3.30579).round();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 1),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+      decoration: const BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: Color(0xFFF0F2F5), width: 1),
+        ),
+      ),
+      child: Row(
+        children: [
+          // 날짜
+          SizedBox(
+            width: 58,
+            child: Text(
+              record.dealDateStr,
+              style: const TextStyle(fontSize: 12, color: kTextMuted),
+            ),
+          ),
+          // 층수
+          SizedBox(
+            width: 34,
+            child: Text(
+              '${record.floor > 0 ? record.floor : '-'}층',
+              style: const TextStyle(fontSize: 12, color: kTextMuted),
+              textAlign: TextAlign.center,
+            ),
+          ),
+          // 평형 + 면적
+          Expanded(
+            child: Text(
+              '$pyeong평  ${record.area.toStringAsFixed(1)}㎡',
+              style: const TextStyle(fontSize: 12, color: kTextMuted),
+            ),
+          ),
+          // 가격 (우측, 강조)
+          Text(
+            record.priceLabel,
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: kTextDark,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 탭 3: 임장노트
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ImjangNotesTab extends StatelessWidget {
+  const _ImjangNotesTab({
+    required this.label,
+    required this.reviewCtrl,
+    required this.pendingMedia,
+    required this.isSaving,
+    required this.canSubmit,
+    required this.onPickImages,
+    required this.onSubmit,
+    required this.onRemoveMedia,
+    required this.onTextChanged,
+  });
+
+  final String label;
+  final TextEditingController reviewCtrl;
+  final List<XFile> pendingMedia;
+  final bool isSaving, canSubmit;
+  final VoidCallback onPickImages, onSubmit, onTextChanged;
+  final void Function(int) onRemoveMedia;
+
+  @override
+  Widget build(BuildContext context) {
+    final bId = HouseLogService.buildingId(label);
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          child: _QuickInputBox(
+            controller: reviewCtrl,
+            pendingMedia: pendingMedia,
+            isSaving: isSaving,
+            canSubmit: canSubmit,
+            onPickImages: onPickImages,
+            onSubmit: onSubmit,
+            onRemoveMedia: onRemoveMedia,
+            onTextChanged: onTextChanged,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: ImjangService().logsStreamByBuilding(bId),
+            builder: (ctx, snap) {
+              if (snap.connectionState == ConnectionState.waiting) {
+                return const Center(
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                );
+              }
+              final docs = snap.data?.docs ?? [];
+              if (docs.isEmpty) {
+                return const _EmptyState(
+                  icon: Icons.note_alt_outlined,
+                  message: '첫 임장 기록을 남겨보세요!',
+                );
+              }
+              return ListView.separated(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 4,
+                ),
+                itemCount: docs.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 8),
+                itemBuilder: (ctx, i) {
+                  final data = docs[i].data();
+                  final mediaUrls =
+                      List<String>.from(data['mediaUrls'] ?? []);
+                  final text = (data['review'] ?? '') as String;
+                  final createdAt =
+                      (data['createdAt'] as Timestamp?)?.toDate() ??
+                      DateTime.now();
+                  return GestureDetector(
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => ImjangNoteDetailScreen(
+                          text: text,
+                          mediaUrls: mediaUrls,
+                          createdAt: createdAt,
+                          docId: docs[i].id,
+                          aptName: label,
+                        ),
+                      ),
+                    ),
+                    child: _NoteListItem(
+                      text: text,
+                      mediaUrls: mediaUrls,
+                      createdAt: createdAt,
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+        SizedBox(height: MediaQuery.of(context).padding.bottom + 8),
+      ],
+    );
+  }
+}
+
+class _NoteListItem extends StatelessWidget {
+  const _NoteListItem({
+    required this.text,
+    required this.mediaUrls,
+    required this.createdAt,
+  });
+
+  final String text;
+  final List<String> mediaUrls;
+  final DateTime createdAt;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: kBorderColor),
+      ),
+      child: Row(
+        children: [
+          // 썸네일
+          ClipRRect(
+            borderRadius: const BorderRadius.horizontal(
+              left: Radius.circular(11),
+            ),
+            child: SizedBox(
+              width: 80,
+              height: 80,
+              child: mediaUrls.isNotEmpty
+                  ? CachedNetworkImage(
+                      imageUrl: mediaUrls.first,
+                      fit: BoxFit.cover,
+                    )
+                  : Container(
+                      color: kPrimary.withValues(alpha: 0.06),
+                      child: const Icon(
+                        Icons.note_alt_outlined,
+                        color: kPrimary,
+                        size: 28,
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    text.isEmpty ? '(사진만 첨부)' : text,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: kTextDark,
+                      height: 1.4,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _formatDate(createdAt),
+                    style: const TextStyle(fontSize: 11, color: kTextMuted),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.only(right: 12),
+            child: Icon(
+              Icons.chevron_right_rounded,
+              color: kTextMuted,
+              size: 20,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatDate(DateTime dt) =>
+      '${dt.year}.${dt.month.toString().padLeft(2, '0')}.${dt.day.toString().padLeft(2, '0')}';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 임장노트 빠른 입력 박스
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _QuickInputBox extends StatelessWidget {
+  const _QuickInputBox({
+    required this.controller,
+    required this.pendingMedia,
+    required this.isSaving,
+    required this.canSubmit,
+    required this.onPickImages,
+    required this.onSubmit,
+    required this.onRemoveMedia,
+    required this.onTextChanged,
+  });
+
+  final TextEditingController controller;
+  final List<XFile> pendingMedia;
+  final bool isSaving, canSubmit;
+  final VoidCallback onPickImages, onSubmit, onTextChanged;
+  final void Function(int) onRemoveMedia;
+
+  @override
+  Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
         color: _kCardBg,
@@ -1188,11 +2603,11 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
               const SizedBox(width: 14),
               Expanded(
                 child: TextField(
-                  controller: _reviewCtrl,
-                  onChanged: (_) => setState(() {}),
-                  maxLines: null,
+                  controller: controller,
+                  onChanged: (_) => onTextChanged(),
+                  maxLines: 5,
                   minLines: 1,
-                  enabled: !_isSaving,
+                  enabled: !isSaving,
                   style: const TextStyle(
                     fontSize: 14,
                     color: kTextDark,
@@ -1211,11 +2626,11 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
                 ),
               ),
               IconButton(
-                onPressed: _isSaving ? null : _pickImages,
+                onPressed: isSaving ? null : onPickImages,
                 icon: Icon(
                   Icons.photo_library_outlined,
                   size: 22,
-                  color: _isSaving
+                  color: isSaving
                       ? Colors.grey.shade300
                       : kPrimary.withValues(alpha: 0.65),
                 ),
@@ -1225,7 +2640,7 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
                 child: SizedBox(
                   height: 34,
                   child: ElevatedButton(
-                    onPressed: _canSubmit ? _submit : null,
+                    onPressed: canSubmit ? onSubmit : null,
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(horizontal: 14),
                       shape: RoundedRectangleBorder(
@@ -1234,7 +2649,7 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
                       minimumSize: Size.zero,
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
-                    child: _isSaving
+                    child: isSaving
                         ? const SizedBox(
                             width: 14,
                             height: 14,
@@ -1248,9 +2663,8 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
                             style: TextStyle(
                               fontSize: 13,
                               fontWeight: FontWeight.w700,
-                              color: _canSubmit
-                                  ? Colors.white
-                                  : Colors.grey.shade500,
+                              color:
+                                  canSubmit ? Colors.white : Colors.grey.shade500,
                             ),
                           ),
                   ),
@@ -1258,14 +2672,14 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
               ),
             ],
           ),
-          if (_pendingMedia.isNotEmpty)
+          if (pendingMedia.isNotEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
               child: SizedBox(
                 height: 72,
                 child: ListView.builder(
                   scrollDirection: Axis.horizontal,
-                  itemCount: _pendingMedia.length,
+                  itemCount: pendingMedia.length,
                   itemBuilder: (_, i) => Stack(
                     children: [
                       Container(
@@ -1279,7 +2693,7 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(7),
                           child: Image.file(
-                            File(_pendingMedia[i].path),
+                            File(pendingMedia[i].path),
                             fit: BoxFit.cover,
                           ),
                         ),
@@ -1288,9 +2702,7 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
                         top: 0,
                         right: 6,
                         child: GestureDetector(
-                          onTap: _isSaving
-                              ? null
-                              : () => setState(() => _pendingMedia.removeAt(i)),
+                          onTap: isSaving ? null : () => onRemoveMedia(i),
                           child: Container(
                             width: 18,
                             height: 18,
@@ -1315,150 +2727,113 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
       ),
     );
   }
+}
 
-  Widget _buildHistorySection() {
-    final bId = HouseLogService.buildingId(widget.label);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          '내 임장 기록',
-          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 8),
-        SizedBox(
-          height: 108,
-          child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-            stream: _service.logsStream(bId),
-            builder: (ctx, snap) {
-              if (snap.connectionState == ConnectionState.waiting)
-                return const Center(child: CircularProgressIndicator());
-              final docs = snap.data?.docs ?? [];
-              if (docs.isEmpty)
-                return const Center(
-                  child: Text(
-                    '첫 임장 기록을 남겨보세요!',
-                    style: TextStyle(color: kTextMuted),
-                  ),
-                );
-              return ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: docs.length,
-                itemBuilder: (ctx, i) {
-                  final data = docs[i].data();
-                  return Container(
-                    width: 130,
-                    margin: const EdgeInsets.only(right: 10),
-                    decoration: BoxDecoration(
-                      color: _kCardBg,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: kBorderColor),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        ClipRRect(
-                          borderRadius: const BorderRadius.vertical(
-                            top: Radius.circular(11),
-                          ),
-                          child: SizedBox(
-                            height: 60,
-                            width: double.infinity,
-                            child:
-                                (data['mediaUrls'] as List?)?.isNotEmpty == true
-                                ? CachedNetworkImage(
-                                    imageUrl: data['mediaUrls'][0],
-                                    fit: BoxFit.cover,
-                                  )
-                                : Container(
-                                    color: kPrimary.withValues(alpha: 0.06),
-                                    child: const Icon(
-                                      Icons.note_alt_outlined,
-                                      color: kPrimary,
-                                    ),
-                                  ),
-                          ),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.all(8),
-                          child: Text(
-                            data['text'] ?? '',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 11),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
+// ─────────────────────────────────────────────────────────────────────────────
+// 공통 헬퍼 위젯
+// ─────────────────────────────────────────────────────────────────────────────
 
-  Widget _buildUnitTabs() {
-    const units = ['15평', '24평', '33평'];
-    return Row(
-      children: units.map((unit) {
-        final selected = _selectedUnit == unit;
-        return Padding(
-          padding: const EdgeInsets.only(right: 8),
-          child: GestureDetector(
-            onTap: () => setState(() => _selectedUnit = unit),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              curve: Curves.easeInOut,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
-              decoration: BoxDecoration(
-                color: selected ? kPrimary : Colors.white,
-                borderRadius: BorderRadius.circular(22),
-                border: Border.all(
-                  color: selected ? kPrimary : kBorderColor,
-                  width: 1.2,
-                ),
-                boxShadow: selected
-                    ? [
-                        BoxShadow(
-                          color: kPrimary.withValues(alpha: 0.28),
-                          blurRadius: 10,
-                          offset: const Offset(0, 4),
-                        ),
-                      ]
-                    : [],
-              ),
-              child: AnimatedDefaultTextStyle(
-                duration: const Duration(milliseconds: 200),
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: selected ? Colors.white : kTextMuted,
-                ),
-                child: Text(unit),
-              ),
-            ),
-          ),
-        );
-      }).toList(),
-    );
-  }
+class _InfoCard extends StatelessWidget {
+  const _InfoCard({required this.children});
+  final List<Widget> children;
 
-  // ── 로딩/에러/빈 결과 공용 Empty-State ────────────────────────────────────
-  Widget _emptyTradeState({required IconData icon, required String message}) {
+  @override
+  Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 32),
-      width: double.infinity,
       decoration: BoxDecoration(
-        color: Colors.grey.shade50,
-        borderRadius: BorderRadius.circular(16),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: kBorderColor),
       ),
       child: Column(
+        children: children.asMap().entries.map((e) {
+          final isLast = e.key == children.length - 1;
+          return Column(
+            children: [
+              e.value,
+              if (!isLast)
+                const Divider(
+                  height: 1,
+                  thickness: 1,
+                  indent: 16,
+                  endIndent: 16,
+                ),
+            ],
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({required this.label, required this.value});
+  final String label, value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 36, color: Colors.grey.shade300),
+          SizedBox(
+            width: 80,
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 13,
+                color: kTextMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(
+                fontSize: 13,
+                color: kTextDark,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LoadingRow extends StatelessWidget {
+  const _LoadingRow();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.all(16),
+      child: Center(
+        child: SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  const _EmptyState({required this.icon, required this.message});
+  final IconData icon;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 40, color: Colors.grey.shade300),
           const SizedBox(height: 10),
           Text(
             message,
@@ -1468,543 +2843,76 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet> {
       ),
     );
   }
-
-  Widget _buildTradeSection() {
-    return FutureBuilder<AptTradeData>(
-      future: _dataFuture,
-      builder: (ctx, snap) {
-        // ── 로딩 ────────────────────────────────────────────────────────────
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const SizedBox(
-            height: 80,
-            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-          );
-        }
-        // ── API 오류 ─────────────────────────────────────────────────────────
-        if (snap.hasError || !snap.hasData) {
-          return _emptyTradeState(
-            icon: Icons.cloud_off_outlined,
-            message: '실거래가를 불러오지 못했습니다.',
-          );
-        }
-        // ── RangeError 완벽 방어: 결과 0건 ──────────────────────────────────
-        if (snap.data!.records.isEmpty) {
-          return _emptyTradeState(
-            icon: Icons.info_outline,
-            message: '해당 월의 실거래 내역이 없습니다.',
-          );
-        }
-        // ── 실거래 카드 목록 ─────────────────────────────────────────────────
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              '최근 실거래가',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 10),
-            ...snap.data!.records.map(
-              (r) => Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: kBorderColor),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            r.complexName,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w700,
-                              color: kTextDark,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            '${r.area}㎡  ·  ${r.floor}층',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: kTextMuted,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          r.priceLabel,
-                          style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w800,
-                            color: kTextDark,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          r.dealDateStr,
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: kTextMuted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
 }
 
-// 나머지 UI 컴포넌트들 (기존 코드에서 분리된 부분)
-class _PriceOverviewCard extends StatelessWidget {
-  const _PriceOverviewCard({required this.data});
-  final _UnitData data;
-  @override
-  Widget build(BuildContext context) => Container(
-    color: Colors.white,
-    padding: const EdgeInsets.all(16),
-    child: Text('매매가: ${data.salePrice} / 전세가율: ${data.jeonseRate}'),
-  );
-}
 
-class _PriceTrendChartCard extends StatelessWidget {
-  const _PriceTrendChartCard({required this.data});
-  final _UnitData data;
+// ─────────────────────────────────────────────────────────────────────────────
+// 마커 가격 데이터 모델
+// ─────────────────────────────────────────────────────────────────────────────
 
-  Widget _legendItem(Color color, String label, {required bool dashed}) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        SizedBox(
-          width: 20,
-          height: 10,
-          child: CustomPaint(
-            painter: _DashLinePainter(color: color, dashed: dashed),
-          ),
-        ),
-        const SizedBox(width: 5),
-        Text(
-          label,
-          style: const TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            color: kTextMuted,
-          ),
-        ),
-      ],
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(8, 16, 16, 10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kBorderColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── 범례 ───────────────────────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.only(left: 8),
-            child: Row(
-              children: [
-                _legendItem(kPrimary, '매매가', dashed: false),
-                const SizedBox(width: 18),
-                _legendItem(kSecondary, '전세가', dashed: true),
-              ],
-            ),
-          ),
-          const SizedBox(height: 14),
-          // ── LineChart ──────────────────────────────────────────────────────
-          SizedBox(
-            height: 160,
-            child: LineChart(
-              LineChartData(
-                minX: 1,
-                maxX: 12,
-                minY: data.chartMinY,
-                maxY: data.chartMaxY,
-                clipData: const FlClipData.all(),
-                gridData: FlGridData(
-                  show: true,
-                  drawVerticalLine: false,
-                  horizontalInterval: (data.chartMaxY - data.chartMinY) / 4,
-                  getDrawingHorizontalLine: (_) =>
-                      FlLine(color: Colors.grey.shade100, strokeWidth: 1),
-                ),
-                borderData: FlBorderData(show: false),
-                titlesData: FlTitlesData(
-                  // ── Y축 (왼쪽) ─────────────────────────────────────────────
-                  leftTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      reservedSize: 38,
-                      interval: (data.chartMaxY - data.chartMinY) / 4,
-                      getTitlesWidget: (value, meta) {
-                        if (value == meta.min || value == meta.max) {
-                          return const SizedBox.shrink();
-                        }
-                        return Text(
-                          '${value.toStringAsFixed(0)}억',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Colors.grey.shade400,
-                          ),
-                          textAlign: TextAlign.right,
-                        );
-                      },
-                    ),
-                  ),
-                  // ── X축 (아래) ─────────────────────────────────────────────
-                  bottomTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      interval: 1,
-                      getTitlesWidget: (value, meta) {
-                        const visible = {1, 4, 7, 10, 12};
-                        final v = value.toInt();
-                        if (!visible.contains(v))
-                          return const SizedBox.shrink();
-                        return Padding(
-                          padding: const EdgeInsets.only(top: 4),
-                          child: Text(
-                            '$v월',
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: Colors.grey.shade400,
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                  rightTitles: const AxisTitles(
-                    sideTitles: SideTitles(showTitles: false),
-                  ),
-                  topTitles: const AxisTitles(
-                    sideTitles: SideTitles(showTitles: false),
-                  ),
-                ),
-                lineBarsData: [
-                  // ── 매매가: kPrimary 실선 + 연한 fill ──────────────────────
-                  LineChartBarData(
-                    spots: data.saleSpots,
-                    isCurved: true,
-                    curveSmoothness: 0.35,
-                    color: kPrimary,
-                    barWidth: 2.5,
-                    dotData: const FlDotData(show: false),
-                    belowBarData: BarAreaData(
-                      show: true,
-                      color: kPrimary.withValues(alpha: 0.07),
-                    ),
-                  ),
-                  // ── 전세가: kSecondary 점선 + 연한 fill ────────────────────
-                  LineChartBarData(
-                    spots: data.jeonseSpots,
-                    isCurved: true,
-                    curveSmoothness: 0.35,
-                    color: kSecondary,
-                    barWidth: 2.0,
-                    dashArray: [6, 4],
-                    dotData: const FlDotData(show: false),
-                    belowBarData: BarAreaData(
-                      show: true,
-                      color: kSecondary.withValues(alpha: 0.05),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// 범례 점선/실선을 그리는 CustomPainter
-class _DashLinePainter extends CustomPainter {
-  const _DashLinePainter({required this.color, required this.dashed});
-  final Color color;
-  final bool dashed;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 2.5
-      ..strokeCap = StrokeCap.round;
-    final y = size.height / 2;
-    if (!dashed) {
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
-    } else {
-      var x = 0.0;
-      while (x < size.width) {
-        canvas.drawLine(
-          Offset(x, y),
-          Offset((x + 4.0).clamp(0.0, size.width), y),
-          paint,
-        );
-        x += 7.0;
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(_DashLinePainter old) => false;
-}
-
-class _BuildingInfoCard extends StatelessWidget {
-  const _BuildingInfoCard();
-
-  // ── 지표 셀 ──────────────────────────────────────────────────────────────
-  Widget _statCell(IconData icon, Color iconColor, String label, String value) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: _kPageBg,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 아이콘 배지
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: iconColor.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(9),
-              ),
-              child: Icon(icon, size: 17, color: iconColor),
-            ),
-            const SizedBox(height: 9),
-            // 라벨 (작고 은은한 회색)
-            Text(
-              label,
-              style: const TextStyle(
-                fontSize: 12,
-                color: kTextMuted,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(height: 3),
-            // 값 (크고 굵게)
-            Text(
-              value,
-              style: const TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w800,
-                color: kTextDark,
-                letterSpacing: -0.3,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ── 구조/난방 태그 ────────────────────────────────────────────────────────
-  Widget _infoTag(String label) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: kBorderColor, width: 0.8),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w500,
-          color: kTextMuted,
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kBorderColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── 1행: 세대수 / 연차 ──────────────────────────────────────────────
-          Row(
-            children: [
-              _statCell(Icons.apartment_rounded, kPrimary, '세대수', '1,542세대'),
-              const SizedBox(width: 10),
-              _statCell(
-                Icons.calendar_today_rounded,
-                kSecondary,
-                '연차',
-                '15년차 (2012)',
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          // ── 2행: 주차 / 용적률·건폐율 ───────────────────────────────────────
-          Row(
-            children: [
-              _statCell(
-                Icons.directions_car_rounded,
-                kPrimary,
-                '주차',
-                '세대당 1.15대',
-              ),
-              const SizedBox(width: 10),
-              _statCell(
-                Icons.stacked_bar_chart_rounded,
-                kSecondary,
-                '용적률/건폐율',
-                '240% / 18%',
-              ),
-            ],
-          ),
-          // ── 구분선 ──────────────────────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Divider(height: 1, color: kBorderColor),
-          ),
-          // ── 구조/난방 태그 ───────────────────────────────────────────────────
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              _infoTag('개별난방'),
-              _infoTag('계단식'),
-              _infoTag('지역가스'),
-              _infoTag('방음벽'),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SchoolLocationCard extends StatelessWidget {
-  const _SchoolLocationCard();
-  @override
-  Widget build(BuildContext context) => Container(
-    color: Colors.white,
-    padding: const EdgeInsets.all(16),
-    child: const Text('분당초등학교 / 정자역 도보 12분'),
-  );
-}
-
-class _DongBreakdownCard extends StatelessWidget {
-  const _DongBreakdownCard();
-  @override
-  Widget build(BuildContext context) => const ExpansionTile(
-    title: Text('동별 세대수'),
-    children: [ListTile(title: Text('101동 72세대'))],
-  );
-}
-
-// _ImjangBottomSheet (기존과 동일하므로 빈 클래스 형태 또는 축약)
-class _ImjangBottomSheet extends StatelessWidget {
-  const _ImjangBottomSheet({required this.latLng});
-  final NLatLng latLng;
-  @override
-  Widget build(BuildContext context) => Container(
-    height: 300,
-    color: Colors.white,
-    child: const Center(child: Text('임장 기록 폼 (기존 유지)')),
-  );
+class _MarkerPrice {
+  const _MarkerPrice({required this.priceLabel, required this.pyeongLabel});
+  final String priceLabel; // "8.5억"
+  final String pyeongLabel; // "24평"
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 말풍선 마커 위젯
+// 말풍선 마커 위젯 (네이비 카드 + 흰 텍스트)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// NOverlayImage.fromWidget()으로 렌더링되는 말풍선 마커.
+/// [레이아웃]  setAnchor(0.5, 1.0) 필수.
 ///
-/// [레이아웃]
-///   ┌──────────────┐
-///   │  8.5억  bold │  ← priceLabel (kPrimary, 14sp)
-///   │    84㎡      │  ← areaLabel  (kTextMuted, 10sp) — 없으면 생략
-///   └──────┬───────┘
-///          ▼ 꼭지점 (말풍선 포인터)
-///
-/// 꼭지점 하단이 좌표에 정확히 맞도록 setAnchor(0.5, 1.0) 필수.
+///   ┌─────────────┐
+///   │    8.5억    │  ← 흰색 bold 15sp
+///   │    24평     │  ← 반투명 흰색 10sp
+///   └──────┬──────┘
+///          ▼ 포인터
 class _AptPriceBubble extends StatelessWidget {
-  const _AptPriceBubble({required this.priceLabel, required this.areaLabel});
+  const _AptPriceBubble({
+    required this.priceLabel,
+    required this.pyeongLabel,
+  });
 
   final String priceLabel;
-  final String areaLabel;
+  final String pyeongLabel;
 
-  static const _kPointerH = 7.0; // 말풍선 꼭지점 높이
+  static const _kPointerH = 7.0;
 
   @override
   Widget build(BuildContext context) {
-    final hasArea = areaLabel.isNotEmpty;
     final hasPrice = priceLabel.isNotEmpty;
+    final hasPyeong = pyeongLabel.isNotEmpty;
 
-    // Column 래퍼 불필요 — CustomPaint가 부모 constraint를 직접 받음
     return CustomPaint(
-      painter: _BubblePainter(
-        fillColor: Colors.white,
-        strokeColor: kPrimary,
-        pointerH: _kPointerH,
-      ),
+      painter: const _BubblePainter(),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 6, 10, 6 + _kPointerH),
+        padding: EdgeInsets.fromLTRB(10, 6, 10, 6 + _kPointerH),
         child: Column(
           mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // 가격
+            // 가격 (크게)
             Text(
-              hasPrice ? priceLabel : '시세 준비중',
+              hasPrice ? priceLabel : '시세없음',
               style: TextStyle(
-                fontSize: hasPrice ? 12 : 11,
+                fontSize: hasPrice ? 15 : 11,
                 fontWeight: FontWeight.w800,
-                color: hasPrice ? kPrimary : kTextMuted,
-                height: 1.1,
+                color: Colors.white,
+                height: 1.15,
+                letterSpacing: -0.4,
               ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            // 면적 (있을 때만)
-            if (hasArea) ...[
-              const SizedBox(height: 1),
+            // 평수 (작게, 한 줄 간격)
+            if (hasPyeong) ...[
+              const SizedBox(height: 5),
               Text(
-                areaLabel,
-                style: const TextStyle(
+                pyeongLabel,
+                style: TextStyle(
                   fontSize: 10,
-                  fontWeight: FontWeight.w500,
-                  color: kTextMuted,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white.withOpacity(0.85),
                   height: 1.1,
                 ),
               ),
@@ -2016,86 +2924,56 @@ class _AptPriceBubble extends StatelessWidget {
   }
 }
 
-/// 말풍선 모양 CustomPainter.
-/// 둥근 사각형 본체 + 하단 중앙 삼각형 포인터를 하나의 Path로 그림.
+/// 네이비 말풍선 CustomPainter.
+/// kPrimary 그라디언트 본체 + 하단 삼각 포인터 + 드롭섀도우.
 class _BubblePainter extends CustomPainter {
-  const _BubblePainter({
-    required this.fillColor,
-    required this.strokeColor,
-    required this.pointerH,
-  });
+  const _BubblePainter();
 
-  final Color fillColor;
-  final Color strokeColor;
-  final double pointerH;
-
-  static const _radius = 8.0;
-  static const _pointerW = 12.0; // 포인터 밑변 너비
-  static const _stroke = 1.5;
+  static const _radius = 10.0;
+  static const _pointerH = 7.0;
+  static const _pointerW = 12.0;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final bodyH = size.height - pointerH;
+    final bodyH = size.height - _pointerH;
     final cx = size.width / 2;
 
     final path = Path()
-      // 상단 좌측 모서리
       ..moveTo(_radius, 0)
       ..lineTo(size.width - _radius, 0)
-      ..arcToPoint(
-        Offset(size.width, _radius),
-        radius: const Radius.circular(_radius),
-      )
-      // 우측 변
+      ..arcToPoint(Offset(size.width, _radius),
+          radius: const Radius.circular(_radius))
       ..lineTo(size.width, bodyH - _radius)
-      ..arcToPoint(
-        Offset(size.width - _radius, bodyH),
-        radius: const Radius.circular(_radius),
-      )
-      // 포인터 우측
+      ..arcToPoint(Offset(size.width - _radius, bodyH),
+          radius: const Radius.circular(_radius))
       ..lineTo(cx + _pointerW / 2, bodyH)
-      // 포인터 꼭지점
       ..lineTo(cx, size.height)
-      // 포인터 좌측
       ..lineTo(cx - _pointerW / 2, bodyH)
-      // 좌측 변
       ..lineTo(_radius, bodyH)
-      ..arcToPoint(
-        Offset(0, bodyH - _radius),
-        radius: const Radius.circular(_radius),
-      )
+      ..arcToPoint(Offset(0, bodyH - _radius),
+          radius: const Radius.circular(_radius))
       ..lineTo(0, _radius)
-      ..arcToPoint(
-        const Offset(_radius, 0),
-        radius: const Radius.circular(_radius),
-      )
+      ..arcToPoint(const Offset(_radius, 0),
+          radius: const Radius.circular(_radius))
       ..close();
 
-    // 그림자
-    canvas.drawShadow(path, Colors.black26, 3, false);
+    // 드롭섀도우
+    canvas.drawShadow(path, const Color(0x66D84315), 5, true);
 
-    // 채우기
+    // 그라디언트 채우기
+    final rect = Rect.fromLTWH(0, 0, size.width, bodyH);
     canvas.drawPath(
       path,
       Paint()
-        ..color = fillColor
+        ..shader = const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFFFF7043), Color(0xFFE64A19)],
+        ).createShader(rect)
         ..style = PaintingStyle.fill,
-    );
-
-    // 테두리
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = strokeColor
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = _stroke
-        ..strokeJoin = StrokeJoin.round,
     );
   }
 
   @override
-  bool shouldRepaint(_BubblePainter old) =>
-      old.fillColor != fillColor ||
-      old.strokeColor != strokeColor ||
-      old.pointerH != pointerH;
+  bool shouldRepaint(_BubblePainter old) => false;
 }

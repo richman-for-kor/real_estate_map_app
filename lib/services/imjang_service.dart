@@ -1,8 +1,10 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 
 /// 임장 기록 저장 서비스.
 ///
@@ -34,8 +36,13 @@ class ImjangService {
     required double longitude,
     required String review,
     required List<File> mediaFiles,
+    String sido = '',
+    String sigungu = '',
+    String eupmyeondong = '',
+    String buildingId = '', // 지도 팝업 단지별 필터용 (빈 문자열 = 독립 노트)
   }) async {
-    final uid = _auth.currentUser?.uid ?? 'anonymous';
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) throw Exception('로그인이 필요합니다.');
     final recordRef = _firestore.collection('imjang_records').doc();
     final recordId = recordRef.id;
     final ts = DateTime.now().millisecondsSinceEpoch;
@@ -51,17 +58,15 @@ class ImjangService {
         mediaFiles.asMap().entries.map((entry) async {
           final index = entry.key;
           final file = entry.value;
-          // split('.').last는 경로에 '.'이 없으면 파일명 전체를 반환 — 안전한 폴백 적용
-          final pathStr = file.path;
-          final dotIdx = pathStr.lastIndexOf('.');
-          final ext = dotIdx != -1
-              ? pathStr.substring(dotIdx + 1).toLowerCase()
-              : 'jpg';
           final storagePath =
-              'imjang_records/$uid/$recordId/${index}_$ts.$ext';
+              'imjang_records/$uid/$recordId/${index}_$ts.jpg';
 
           final ref = _storage.ref(storagePath);
-          final snapshot = await ref.putFile(file);
+          final bytes = await _compressImage(file);
+          final snapshot = await ref.putData(
+            bytes,
+            SettableMetadata(contentType: 'image/jpeg'),
+          );
           final url = await snapshot.ref.getDownloadURL();
           uploadedRefs.add(ref); // 성공한 ref 추적 (롤백용)
           return url;
@@ -82,11 +87,15 @@ class ImjangService {
         'title': title,
         'address': address,
         'region': region,
+        'sido': sido,
+        'sigungu': sigungu,
+        'eupmyeondong': eupmyeondong,
         'latitude': latitude,
         'longitude': longitude,
         'review': review,
         'mediaUrls': downloadUrls,
         'createdAt': FieldValue.serverTimestamp(),
+        if (buildingId.isNotEmpty) 'buildingId': buildingId,
       });
     } catch (e) {
       // Firestore 저장 실패 → Storage 파일 전체 롤백
@@ -95,5 +104,124 @@ class ImjangService {
       }
       rethrow;
     }
+  }
+
+  // ── 수정 ────────────────────────────────────────────────────────────────
+
+  /// 임장 기록 텍스트/이미지를 수정합니다.
+  Future<void> updateRecord({
+    required String docId,
+    required String review,
+    required List<String> existingUrls,
+    required List<File> newImageFiles,
+    required List<String> deletedUrls,
+  }) async {
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) throw Exception('로그인이 필요합니다.');
+
+    for (final url in deletedUrls) {
+      try {
+        await _storage.refFromURL(url).delete();
+      } catch (_) {}
+    }
+
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    final newUrls = <String>[];
+    final uploadedRefs = <Reference>[];
+    try {
+      for (int i = 0; i < newImageFiles.length; i++) {
+        final bytes = await _compressImage(newImageFiles[i]);
+        final path = 'imjang_records/$uid/${docId}_edit_${i}_$ts.jpg';
+        final ref = _storage.ref(path);
+        await ref.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
+        newUrls.add(await ref.getDownloadURL());
+        uploadedRefs.add(ref);
+      }
+    } catch (e) {
+      for (final ref in uploadedRefs) {
+        ref.delete().catchError((_) {});
+      }
+      rethrow;
+    }
+
+    try {
+      await _firestore.collection('imjang_records').doc(docId).update({
+        'review': review,
+        'mediaUrls': [...existingUrls, ...newUrls],
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      // Firestore 실패 → 새로 업로드한 Storage 파일 롤백
+      for (final ref in uploadedRefs) {
+        ref.delete().catchError((_) {});
+      }
+      rethrow;
+    }
+  }
+
+  // ── 삭제 ────────────────────────────────────────────────────────────────
+
+  /// 임장 기록을 삭제합니다 (Firestore 문서 + Storage 파일 모두 제거).
+  Future<void> deleteRecord({
+    required String docId,
+    required List<String> mediaUrls,
+  }) async {
+    for (final url in mediaUrls) {
+      try {
+        await _storage.refFromURL(url).delete();
+      } catch (_) {}
+    }
+    await _firestore.collection('imjang_records').doc(docId).delete();
+  }
+
+  // ── 실시간 쿼리 Stream ───────────────────────────────────────────────────
+
+  /// 특정 단지(buildingId)에 대한 내 임장 기록 실시간 Stream (최신순 20건).
+  ///
+  /// 지도 탭 단지 팝업의 임장노트 탭에서 사용.
+  /// 비로그인 시 빈 Stream 반환.
+  Stream<QuerySnapshot<Map<String, dynamic>>> logsStreamByBuilding(
+      String buildingId) {
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) return const Stream.empty();
+
+    return _firestore
+        .collection('imjang_records')
+        .where('uid', isEqualTo: uid)
+        .where('buildingId', isEqualTo: buildingId)
+        .orderBy('createdAt', descending: true)
+        .limit(20)
+        .snapshots();
+  }
+
+  /// 이미지 압축 (1MB 이하 보장). 실패 시 원본 bytes 반환.
+  ///
+  /// 1차: 1080px / quality 80 → 결과가 1MB 초과이면
+  /// 2차: 1080px / quality 55 로 재압축.
+  Future<Uint8List> _compressImage(File file) async {
+    const maxBytes = 1024 * 1024; // 1 MB
+    try {
+      Uint8List? result = await FlutterImageCompress.compressWithFile(
+        file.path,
+        minWidth: 1080,
+        minHeight: 1080,
+        quality: 80,
+        format: CompressFormat.jpeg,
+      );
+      if (result != null && result.isNotEmpty) {
+        if (result.length <= maxBytes) return result;
+        final retry = await FlutterImageCompress.compressWithFile(
+          file.path,
+          minWidth: 1080,
+          minHeight: 1080,
+          quality: 55,
+          format: CompressFormat.jpeg,
+        );
+        if (retry != null && retry.isNotEmpty) return retry;
+      }
+    } catch (_) {
+      // 압축 실패(비지원 포맷 등) → 원본 사용
+    }
+    return file.readAsBytes();
   }
 }

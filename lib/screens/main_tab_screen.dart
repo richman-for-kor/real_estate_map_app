@@ -5,6 +5,9 @@ import 'map_screen.dart';
 import 'imjang_screen.dart';
 import 'my_page_screen.dart';
 
+/// 지도 이동 요청 모델 (홈 → 지도 탭 간 좌표 전달)
+typedef _MapJumpTarget = ({double lat, double lng});
+
 /// 앱의 루트 화면. Bottom Navigation + IndexedStack 4탭 구조.
 ///
 /// [PM] Deferred Auth 전략의 핵심.
@@ -24,6 +27,9 @@ class MainTabScreen extends StatefulWidget {
 class _MainTabScreenState extends State<MainTabScreen> {
   int _currentIndex = 0;
 
+  // 홈 탭에서 지역 카드를 탭할 때 지도 이동 좌표를 전달하는 notifier
+  final _mapJumpTarget = ValueNotifier<_MapJumpTarget?>(null);
+
   // [CTO] late final: initState에서 1회 생성 후 build()에서 재생성되지 않음.
   // HomeScreen이 onTabSwitch 콜백을 포함하므로 const 불가 → initState 초기화 필수.
   late final List<Widget> _screens;
@@ -32,14 +38,31 @@ class _MainTabScreenState extends State<MainTabScreen> {
   void initState() {
     super.initState();
     _screens = [
-      HomeScreen(onTabSwitch: _switchTab), // 콜백 전달
-      const MapScreen(),
+      HomeScreen(
+        onTabSwitch: _switchTab,
+        onMapRegionTap: _onMapRegionTap,
+      ),
+      MapScreen(jumpTarget: _mapJumpTarget),
       const ImjangScreen(),
       const MyPageScreen(),
     ];
   }
 
+  @override
+  void dispose() {
+    _mapJumpTarget.dispose();
+    super.dispose();
+  }
+
   void _switchTab(int index) => setState(() => _currentIndex = index);
+
+  void _onMapRegionTap(double lat, double lng) {
+    _switchTab(1);
+    // 짧은 딜레이 후 이동 (탭 전환 애니메이션 후 지도 컨트롤러가 준비되도록)
+    Future.delayed(const Duration(milliseconds: 150), () {
+      _mapJumpTarget.value = (lat: lat, lng: lng);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -56,14 +79,11 @@ class _MainTabScreenState extends State<MainTabScreen> {
     return Container(
       decoration: BoxDecoration(
         color: kSurface,
-        border: Border(
-          top: BorderSide(color: Colors.grey.shade200, width: 1),
-        ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.06),
-            blurRadius: 12,
-            offset: const Offset(0, -3),
+            color: const Color(0x0F000000),
+            blurRadius: 16,
+            offset: const Offset(0, -4),
           ),
         ],
       ),
@@ -105,11 +125,11 @@ class _MainTabScreenState extends State<MainTabScreen> {
           BottomNavigationBarItem(
             icon: Padding(
               padding: EdgeInsets.only(bottom: 2),
-              child: Icon(Icons.edit_note_outlined, size: 26),
+              child: Icon(Icons.note_alt_outlined, size: 24),
             ),
             activeIcon: Padding(
               padding: EdgeInsets.only(bottom: 2),
-              child: Icon(Icons.edit_note_rounded, size: 26),
+              child: Icon(Icons.note_alt_rounded, size: 24),
             ),
             label: '임장노트',
           ),
