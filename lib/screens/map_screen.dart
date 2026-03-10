@@ -335,8 +335,7 @@ class _MapScreenState extends State<MapScreen> {
     if (_mapController == null) return;
     final position = await _mapController!.getCameraPosition();
     final zoom = position.zoom;
-    final center = position.target;
-    debugPrint('[CameraIdle] zoom=$zoom center=(${center.latitude.toStringAsFixed(4)}, ${center.longitude.toStringAsFixed(4)})');
+    debugPrint('[CameraIdle] zoom=${zoom.toStringAsFixed(1)}');
 
     // 줌 12 미만 → 마커 전체 제거
     if (zoom < 12) {
@@ -344,30 +343,45 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    // ── 뷰포트 밖 마커 제거 (카메라 중심 + 줌 기반, await 필수) ─────────────
-    await _removeOutOfBoundsMarkers(center, zoom);
+    // ── NaverMap 정확한 화면 Bounds 취득 ───────────────────────────────────
+    NLatLngBounds contentBounds;
+    try {
+      contentBounds = await _mapController!.getContentBounds();
+    } catch (e) {
+      debugPrint('[CameraIdle] getContentBounds 실패: $e');
+      return;
+    }
 
-    // ── 뷰포트 안 새 법정동 코드 탐색 (5-포인트 샘플링) ──────────────────────
-    // 줌 레벨에 따른 대략적인 뷰포트 반경 (°)
-    // zoom 14 기준 ±0.022° lat, ±0.032° lng, 줌 1 단계 차이마다 2배 스케일
-    final scale = pow(2.0, 14.0 - zoom);
-    final latR = 0.022 * scale;
-    final lngR = 0.032 * scale;
+    // 렌더/삭제 기준: 화면 bounds + 0.01° 버퍼 (가장자리 깜빡임 방지)
+    const buf = 0.01;
+    final renderBounds = NLatLngBounds(
+      southWest: NLatLng(
+        contentBounds.southWest.latitude - buf,
+        contentBounds.southWest.longitude - buf,
+      ),
+      northEast: NLatLng(
+        contentBounds.northEast.latitude + buf,
+        contentBounds.northEast.longitude + buf,
+      ),
+    );
 
-    final samplePoints = [
-      center,                                                    // 중심
-      NLatLng(center.latitude - latR * 0.7, center.longitude),  // 남쪽
-      NLatLng(center.latitude + latR * 0.7, center.longitude),  // 북쪽
-      NLatLng(center.latitude, center.longitude - lngR * 0.7),  // 서쪽
-      NLatLng(center.latitude, center.longitude + lngR * 0.7),  // 동쪽
-    ];
+    // ── 화면 밖 마커 정확히 제거 ───────────────────────────────────────────
+    await _removeOutOfBoundsMarkers(renderBounds);
 
+    // ── 4×4 그리드 샘플링 — 화면 구석 법정동 누락 방지 ────────────────────
+    final sw = contentBounds.southWest;
+    final ne = contentBounds.northEast;
+    const divisions = 3; // 0~3 → 4×4 = 16 포인트
     final newBjdCodes = <String>{};
-    for (final pt in samplePoints) {
-      if (!mounted) return;
-      final bjdCode = await _getCachedBjdCode(pt.latitude, pt.longitude);
-      if (bjdCode != null && !_loadedBjdCodes.contains(bjdCode)) {
-        newBjdCodes.add(bjdCode);
+    for (var r = 0; r <= divisions; r++) {
+      for (var c = 0; c <= divisions; c++) {
+        if (!mounted) return;
+        final lat = sw.latitude + (ne.latitude - sw.latitude) * r / divisions;
+        final lng = sw.longitude + (ne.longitude - sw.longitude) * c / divisions;
+        final bjdCode = await _getCachedBjdCode(lat, lng);
+        if (bjdCode != null && !_loadedBjdCodes.contains(bjdCode)) {
+          newBjdCodes.add(bjdCode);
+        }
       }
     }
 
@@ -383,8 +397,9 @@ class _MapScreenState extends State<MapScreen> {
     try {
       for (final bjdCode in newBjdCodes) {
         if (!mounted || generation != _renderGeneration) return;
-        _loadedBjdCodes.add(bjdCode); // 즉시 선점 → 중복 요청 방지
-        await _fetchAndRenderBjdCode(bjdCode, generation);
+        // 선점: 중복 요청 방지 (실패/취소 시 _fetchAndRenderBjdCode에서 rollback)
+        _loadedBjdCodes.add(bjdCode);
+        await _fetchAndRenderBjdCode(bjdCode, generation, renderBounds);
       }
     } finally {
       if (showLoading) {
@@ -394,32 +409,16 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  // ── 뷰포트 밖 마커 제거 — 카메라 중심 + 줌 레벨 기반 ─────────────────────
-  // getContentBounds() 대신 카메라 위치 + 줌에서 직접 제거 반경을 계산하여
-  // API 의존 없이 항상 정확하게 동작하도록 함.
+  // ── 뷰포트 밖 마커 정확히 제거 — getContentBounds() 기반 ──────────────────
+  // 임의의 수학 공식 없이 실제 화면 bounds를 기준으로 판단.
   // deleteOverlay를 await(Future.wait 배치)하여 플랫폼 채널 호출을 완료 보장.
-  Future<void> _removeOutOfBoundsMarkers(NLatLng center, double zoom) async {
+  Future<void> _removeOutOfBoundsMarkers(NLatLngBounds removeBounds) async {
     if (_aptMarkerMap.isEmpty || _mapController == null) return;
-
-    // 제거 반경: 뷰포트 반경의 약 1.8배
-    // zoom 14 기준: lat ≈ ±0.040°, lng ≈ ±0.058° 이상 벗어나면 제거
-    final scale = pow(2.0, 14.0 - zoom);
-    final latRemRadius = 0.022 * scale * 1.8;
-    final lngRemRadius = 0.032 * scale * 1.8;
-
-    final minLat = center.latitude - latRemRadius;
-    final maxLat = center.latitude + latRemRadius;
-    final minLng = center.longitude - lngRemRadius;
-    final maxLng = center.longitude + lngRemRadius;
 
     // 제거 대상 수집 (id → NOverlayInfo)
     final toRemove = <String, NOverlayInfo>{};
     for (final entry in _aptMarkerMap.entries) {
-      final pos = entry.value.position;
-      if (pos.latitude < minLat ||
-          pos.latitude > maxLat ||
-          pos.longitude < minLng ||
-          pos.longitude > maxLng) {
+      if (!_boundsContains(removeBounds, entry.value.position)) {
         toRemove[entry.key] = entry.value.info;
       }
     }
@@ -445,6 +444,13 @@ class _MapScreenState extends State<MapScreen> {
       '[MapScreen] 마커 제거 — ${toRemove.length}개 삭제, 남은 ${_aptMarkerMap.length}개',
     );
   }
+
+  /// NLatLngBounds 내부에 점이 포함되는지 확인.
+  bool _boundsContains(NLatLngBounds b, NLatLng p) =>
+      p.latitude >= b.southWest.latitude &&
+      p.latitude <= b.northEast.latitude &&
+      p.longitude >= b.southWest.longitude &&
+      p.longitude <= b.northEast.longitude;
 
   // ── 전체 아파트 마커 제거 (줌 아웃 시) ───────────────────────────────────
   Future<void> _clearAllAptMarkers() async {
@@ -528,21 +534,41 @@ class _MapScreenState extends State<MapScreen> {
   //
   // 이전 방식: Future.wait([apts, priceMap]) → 실거래가 완료 전까지 마커 0개
   // 새 방식  : apts 완료 즉시 기본 마커 표시 → 가격 로드 완료 후 아이콘 교체
-  Future<void> _fetchAndRenderBjdCode(String bjdCode, int generation) async {
-    if (!mounted || _mapController == null) return;
+  Future<void> _fetchAndRenderBjdCode(
+    String bjdCode,
+    int generation,
+    NLatLngBounds renderBounds,
+  ) async {
+    if (!mounted || _mapController == null) {
+      _loadedBjdCodes.remove(bjdCode); // 롤백
+      return;
+    }
     final lawdCd = bjdCode.length >= 5 ? bjdCode.substring(0, 5) : bjdCode;
 
     // ── Phase 1: 단지 목록 로드 → 기본 마커 즉시 표시 ──────────────────────
     List<ApartmentInfo> apts;
     try {
       apts = await ApartmentRepository.instance.getApartmentsByBjdCode(bjdCode);
-      if (!mounted || generation != _renderGeneration) return;
     } catch (e) {
       debugPrint('[MapScreen] 아파트 목록 로드 실패 bjdCode=$bjdCode: $e');
+      _loadedBjdCodes.remove(bjdCode); // 롤백
       return;
     }
 
-    await _addBasicMarkers(apts, bjdCode, lawdCd, generation);
+    // generation 이 바뀌었으면 마커를 그리지 않고 선점도 해제 (롤백)
+    if (!mounted || generation != _renderGeneration) {
+      _loadedBjdCodes.remove(bjdCode);
+      return;
+    }
+
+    await _addBasicMarkers(apts, bjdCode, lawdCd, generation, renderBounds);
+
+    // 마커가 실제로 하나도 추가되지 않았으면 선점 해제 → 재시도 허용
+    if (!_kaptCodeToBjdCode.containsValue(bjdCode)) {
+      _loadedBjdCodes.remove(bjdCode);
+      return;
+    }
+
     if (!mounted || generation != _renderGeneration) return;
 
     // ── Phase 2: 실거래가 백그라운드 로드 → 마커 아이콘 교체 ─────────────
@@ -552,11 +578,13 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── Phase 1: 기본 마커 일괄 추가 (가격 아이콘 없이 빠르게) ────────────────
   // NOverlayImage.fromWidget을 사용하지 않아 즉각 렌더링 가능.
+  // renderBounds 범위 밖 좌표는 추가하지 않아 화면 밖 렌더링 방지.
   Future<void> _addBasicMarkers(
     List<ApartmentInfo> apts,
     String bjdCode,
     String lawdCd,
     int generation,
+    NLatLngBounds renderBounds,
   ) async {
     if (!mounted || _mapController == null) return;
 
@@ -566,6 +594,10 @@ class _MapScreenState extends State<MapScreen> {
       if (_aptMarkerMap.containsKey(apt.kaptCode)) continue; // Diffing
 
       final pos = NLatLng(apt.lat, apt.lng);
+
+      // 화면(+버퍼) 밖이면 마커 추가 생략 → 과도한 렌더링 방지
+      if (!_boundsContains(renderBounds, pos)) continue;
+
       final marker = NMarker(id: apt.kaptCode, position: pos);
 
       // 기본 마커: 캡션(단지명)만, 커스텀 아이콘 없음 → 즉시 표시 가능
