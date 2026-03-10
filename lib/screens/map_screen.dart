@@ -124,20 +124,28 @@ class _MapScreenState extends State<MapScreen> {
   List<dynamic> _searchResults = [];
 
   bool _isLocationLoading = false;
-  bool _isMarkersLoading = false; // 아파트 마커 데이터 로딩 중 여부
+  bool _isMarkersLoading = false; // 초기 로딩 시에만 표시
 
-
-  String? _currentBjdCode; // 현재 카메라 중심의 법정동 코드
+  // ── 뷰포트 기반 마커 상태 ──────────────────────────────────────────────────
+  /// 이미 API/Firestore 에서 데이터를 가져온 법정동 코드 집합.
+  /// 마커가 뷰포트 밖으로 사라지면 해당 코드도 제거하여 복귀 시 재로드를 허용.
+  final Set<String> _loadedBjdCodes = {};
+  /// kaptCode → 해당 마커가 속한 bjdCode (마커 제거 시 _loadedBjdCodes 정리용).
+  final Map<String, String> _kaptCodeToBjdCode = {};
+  /// 그리드 키("lat_idx_lng_idx") → bjdCode 캐시 (역지오코딩 중복 API 호출 방지).
+  final Map<String, String?> _gridBjdCache = {};
+  /// lawdCd → 최근 3개월 실거래가 Future 캐시 (빠른 마커 아이콘용).
+  final Map<String, Future<Map<String, _MarkerPrice>>> _fastPriceMapCache = {};
+  /// lawdCd → 이전 4~12개월 실거래가 Future 캐시 (미매칭 단지 보완용).
+  final Map<String, Future<Map<String, _MarkerPrice>>> _supplementalPriceMapCache = {};
+  /// 렌더링 세대(generation) 카운터 — 이전 렌더 요청을 취소하는 데 사용.
+  int _renderGeneration = 0;
+  /// 앱 첫 로드 여부 — true일 때만 로딩 배지를 표시.
+  bool _isInitialLoad = true;
 
   NMarker? _searchMarker;
   // kaptCode → NMarker (뷰포트 기반 관리)
   final Map<String, NMarker> _aptMarkerMap = {};
-
-  // 지도 초기 위치 (분당 미금역) 에 해당하는 법정동코드.
-  // onCameraIdle + 역지오코딩 구현 시 동적으로 교체됩니다.
-  // ⚠️  공동주택 단지 목록 API는 10자리 법정동코드 필수.
-  //     5자리(시군구) 코드는 HTTP 500 또는 빈 결과 반환.
-  static const _kInitialBjdCode = '4113510300'; // 경기 성남시 분당구 수내1동
 
   static const _kInitialPosition = NCameraPosition(
     target: NLatLng(37.3620, 127.1070), // 분당 미금역 인근
@@ -284,16 +292,15 @@ class _MapScreenState extends State<MapScreen> {
     _mapController = controller;
 
     // 홈 탭 지역 카드에서 이동 요청이 있으면 해당 위치로 이동
+    // → updateCamera 완료 후 _onCameraIdle이 자동으로 발화하여 마커를 로드함
     if (_pendingJump != null) {
       _moveCameraTo(_pendingJump!.lat, _pendingJump!.lng);
       _pendingJump = null;
-      _currentBjdCode = _kInitialBjdCode;
-      _renderAptMarkers(_kInitialBjdCode);
       return;
     }
 
-    // GPS 권한이 있으면 현재 위치를 기본값으로 사용
-    bool movedToCurrentLocation = false;
+    // GPS 권한이 있으면 현재 위치로 카메라 이동
+    bool moved = false;
     try {
       final permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.whileInUse ||
@@ -313,65 +320,154 @@ class _MapScreenState extends State<MapScreen> {
             zoom: 14,
           ),
         );
-        final bjdCode =
-            await _getBjdCodeFromCoords(pos.latitude, pos.longitude);
-        _currentBjdCode = bjdCode ?? _kInitialBjdCode;
-        _renderAptMarkers(_currentBjdCode!);
-        movedToCurrentLocation = true;
+        // updateCamera 완료 → _onCameraIdle 자동 발화
+        moved = true;
       }
     } catch (e) {
       debugPrint('[MapScreen] 초기 현재 위치 이동 실패: $e');
     }
 
-    if (!movedToCurrentLocation) {
-      _currentBjdCode = _kInitialBjdCode;
-      _renderAptMarkers(_kInitialBjdCode);
-    }
+    // 카메라를 이동하지 않은 경우 _onCameraIdle이 자동으로 발화하지 않을 수 있으므로 직접 호출
+    if (!moved && mounted) _onCameraIdle();
   }
 
   Future<void> _onCameraIdle() async {
-    debugPrint('[CameraIdle] 트리거 — loading=$_isMarkersLoading, ctrl=${_mapController != null}');
-    if (_mapController == null || _isMarkersLoading) return;
+    if (_mapController == null) return;
     final position = await _mapController!.getCameraPosition();
-    final lat = position.target.latitude;
-    final lng = position.target.longitude;
     final zoom = position.zoom;
-    debugPrint('[CameraIdle] 좌표: ($lat, $lng) zoom=$zoom');
-    // 줌 레벨 12 미만은 너무 넓은 범위 — 스킵
+    final center = position.target;
+    debugPrint('[CameraIdle] zoom=$zoom center=(${center.latitude.toStringAsFixed(4)}, ${center.longitude.toStringAsFixed(4)})');
+
+    // 줌 12 미만 → 마커 전체 제거
     if (zoom < 12) {
-      debugPrint('[CameraIdle] zoom<12 스킵');
+      await _clearAllAptMarkers();
       return;
     }
-    // 카메라가 이동할 때마다 뷰포트 밖 마커 정리
-    if (!_isMarkersLoading) {
-      await _removeOutOfBoundsMarkers(NLatLng(lat, lng), zoom);
+
+    // ── 뷰포트 밖 마커 제거 (카메라 중심 + 줌 기반, await 필수) ─────────────
+    await _removeOutOfBoundsMarkers(center, zoom);
+
+    // ── 뷰포트 안 새 법정동 코드 탐색 (5-포인트 샘플링) ──────────────────────
+    // 줌 레벨에 따른 대략적인 뷰포트 반경 (°)
+    // zoom 14 기준 ±0.022° lat, ±0.032° lng, 줌 1 단계 차이마다 2배 스케일
+    final scale = pow(2.0, 14.0 - zoom);
+    final latR = 0.022 * scale;
+    final lngR = 0.032 * scale;
+
+    final samplePoints = [
+      center,                                                    // 중심
+      NLatLng(center.latitude - latR * 0.7, center.longitude),  // 남쪽
+      NLatLng(center.latitude + latR * 0.7, center.longitude),  // 북쪽
+      NLatLng(center.latitude, center.longitude - lngR * 0.7),  // 서쪽
+      NLatLng(center.latitude, center.longitude + lngR * 0.7),  // 동쪽
+    ];
+
+    final newBjdCodes = <String>{};
+    for (final pt in samplePoints) {
+      if (!mounted) return;
+      final bjdCode = await _getCachedBjdCode(pt.latitude, pt.longitude);
+      if (bjdCode != null && !_loadedBjdCodes.contains(bjdCode)) {
+        newBjdCodes.add(bjdCode);
+      }
     }
-    final bjdCode = await _getBjdCodeFromCoords(lat, lng);
-    debugPrint('[CameraIdle] bjdCode=$bjdCode, 현재=$_currentBjdCode');
-    if (bjdCode == null || bjdCode == _currentBjdCode) return;
-    _currentBjdCode = bjdCode;
-    _renderAptMarkers(bjdCode);
+
+    if (newBjdCodes.isEmpty) return;
+
+    // ── generation 카운터 증가 → 이전 렌더 작업 무효화 ───────────────────────
+    final generation = ++_renderGeneration;
+
+    // 초기 로드일 때만 로딩 배지 표시
+    final showLoading = _isInitialLoad;
+    if (showLoading && mounted) setState(() => _isMarkersLoading = true);
+
+    try {
+      for (final bjdCode in newBjdCodes) {
+        if (!mounted || generation != _renderGeneration) return;
+        _loadedBjdCodes.add(bjdCode); // 즉시 선점 → 중복 요청 방지
+        await _fetchAndRenderBjdCode(bjdCode, generation);
+      }
+    } finally {
+      if (showLoading) {
+        _isInitialLoad = false;
+        if (mounted) setState(() => _isMarkersLoading = false);
+      }
+    }
   }
 
-  // ── 뷰포트 밖 마커 제거 ────────────────────────────────────────────────────
+  // ── 뷰포트 밖 마커 제거 — 카메라 중심 + 줌 레벨 기반 ─────────────────────
+  // getContentBounds() 대신 카메라 위치 + 줌에서 직접 제거 반경을 계산하여
+  // API 의존 없이 항상 정확하게 동작하도록 함.
+  // deleteOverlay를 await(Future.wait 배치)하여 플랫폼 채널 호출을 완료 보장.
   Future<void> _removeOutOfBoundsMarkers(NLatLng center, double zoom) async {
-    if (_mapController == null || _aptMarkerMap.isEmpty) return;
-    // 줌 14 기준 ±0.08° (≈8km) 이내 마커 유지, 이를 벗어나면 제거
-    final span = 0.08 / pow(2.0, zoom - 14);
-    final toRemove = _aptMarkerMap.entries
-        .where((e) {
-          final pos = e.value.position;
-          return (pos.latitude - center.latitude).abs() > span ||
-              (pos.longitude - center.longitude).abs() > span;
-        })
-        .map((e) => e.key)
-        .toList();
-    if (toRemove.isEmpty) return;
-    for (final id in toRemove) {
-      await _mapController!.deleteOverlay(_aptMarkerMap[id]!.info);
-      _aptMarkerMap.remove(id);
+    if (_aptMarkerMap.isEmpty || _mapController == null) return;
+
+    // 제거 반경: 뷰포트 반경의 약 1.8배
+    // zoom 14 기준: lat ≈ ±0.040°, lng ≈ ±0.058° 이상 벗어나면 제거
+    final scale = pow(2.0, 14.0 - zoom);
+    final latRemRadius = 0.022 * scale * 1.8;
+    final lngRemRadius = 0.032 * scale * 1.8;
+
+    final minLat = center.latitude - latRemRadius;
+    final maxLat = center.latitude + latRemRadius;
+    final minLng = center.longitude - lngRemRadius;
+    final maxLng = center.longitude + lngRemRadius;
+
+    // 제거 대상 수집 (id → NOverlayInfo)
+    final toRemove = <String, NOverlayInfo>{};
+    for (final entry in _aptMarkerMap.entries) {
+      final pos = entry.value.position;
+      if (pos.latitude < minLat ||
+          pos.latitude > maxLat ||
+          pos.longitude < minLng ||
+          pos.longitude > maxLng) {
+        toRemove[entry.key] = entry.value.info;
+      }
     }
-    debugPrint('[MapScreen] 뷰포트 밖 마커 제거 — ${toRemove.length}개, 남은 ${_aptMarkerMap.length}개');
+    if (toRemove.isEmpty) return;
+
+    // 상태를 먼저 동기적으로 갱신 → 동시 호출 시 중복 삭제 방지
+    for (final id in toRemove.keys) {
+      _aptMarkerMap.remove(id);
+      _kaptCodeToBjdCode.remove(id);
+    }
+
+    // 해당 bjdCode의 마커가 모두 사라졌으면 _loadedBjdCodes에서 제거
+    // → 사용자가 다시 돌아오면 Firestore 캐시에서 빠르게 재로드
+    final remaining = _kaptCodeToBjdCode.values.toSet();
+    _loadedBjdCodes.removeWhere((bjd) => !remaining.contains(bjd));
+
+    // 플랫폼 채널 삭제를 배치로 await → 실제 지도에서 마커가 확실히 사라짐
+    await Future.wait(
+      toRemove.values.map((info) => _mapController!.deleteOverlay(info)),
+    );
+
+    debugPrint(
+      '[MapScreen] 마커 제거 — ${toRemove.length}개 삭제, 남은 ${_aptMarkerMap.length}개',
+    );
+  }
+
+  // ── 전체 아파트 마커 제거 (줌 아웃 시) ───────────────────────────────────
+  Future<void> _clearAllAptMarkers() async {
+    if (_aptMarkerMap.isEmpty || _mapController == null) return;
+    final infos = _aptMarkerMap.values.map((m) => m.info).toList();
+    _aptMarkerMap.clear();
+    _kaptCodeToBjdCode.clear();
+    _loadedBjdCodes.clear();
+    await Future.wait(infos.map((info) => _mapController!.deleteOverlay(info)));
+    debugPrint('[MapScreen] 줌 아웃 — 전체 마커 제거');
+  }
+
+  // ── 그리드 기반 좌표 캐시 (역지오코딩 중복 API 호출 방지) ─────────────────
+  // 0.025° lat ≈ 2.8km, 0.035° lng ≈ 3.1km 격자로 캐싱
+  String _gridKey(double lat, double lng) =>
+      '${(lat / 0.025).floor()}_${(lng / 0.035).floor()}';
+
+  Future<String?> _getCachedBjdCode(double lat, double lng) async {
+    final key = _gridKey(lat, lng);
+    if (_gridBjdCache.containsKey(key)) return _gridBjdCache[key];
+    final bjdCode = await _getBjdCodeFromCoords(lat, lng);
+    _gridBjdCache[key] = bjdCode;
+    return bjdCode;
   }
 
   // ── 카카오 로컬 API — 역지오코딩 (좌표 → 법정동 코드) ─────────────────────────
@@ -428,125 +524,236 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  // ── 아파트 마커 일괄 렌더링 (Firebase Read-Through Cache) ─────────────────
-  Future<void> _renderAptMarkers(String bjdCode) async {
-    if (_mapController == null) return;
-    if (_isMarkersLoading) return;
+  // ── Phase-1: 아파트 목록만 즉시 렌더링 → Phase-2: 백그라운드 가격 업데이트 ──
+  //
+  // 이전 방식: Future.wait([apts, priceMap]) → 실거래가 완료 전까지 마커 0개
+  // 새 방식  : apts 완료 즉시 기본 마커 표시 → 가격 로드 완료 후 아이콘 교체
+  Future<void> _fetchAndRenderBjdCode(String bjdCode, int generation) async {
+    if (!mounted || _mapController == null) return;
+    final lawdCd = bjdCode.length >= 5 ? bjdCode.substring(0, 5) : bjdCode;
 
-    setState(() => _isMarkersLoading = true);
-
+    // ── Phase 1: 단지 목록 로드 → 기본 마커 즉시 표시 ──────────────────────
+    List<ApartmentInfo> apts;
     try {
-      // 단지 목록 + 지역 실거래 가격맵을 병렬 로드
-      final lawdCd = bjdCode.length >= 5 ? bjdCode.substring(0, 5) : bjdCode;
-      final results = await Future.wait([
-        ApartmentRepository.instance.getApartmentsByBjdCode(bjdCode),
-        _fetchDistrictPriceMap(lawdCd),
-      ]);
-
-      if (!mounted) return;
-
-      final apts = results[0] as List<ApartmentInfo>;
-      final priceMap = results[1] as Map<String, _MarkerPrice>;
-
-      // ── 1단계: 마커 객체 + 아이콘 순차 생성 (UI 프리징 방어) ─────────────
-      final validApts = apts.where((a) => a.hasValidCoords).toList();
-      final markers = <NMarker>[];
-      for (final apt in validApts) {
-        if (!mounted) return;
-        // 이미 그려진 마커는 스킵
-        if (_aptMarkerMap.containsKey(apt.kaptCode)) continue;
-
-        final pos = NLatLng(apt.lat, apt.lng);
-        final marker = NMarker(id: apt.kaptCode, position: pos);
-
-        // 단지명 기반 가격 매칭 (exact → partial contains → normalized core)
-        final aptName = apt.kaptName.trim();
-        _MarkerPrice? mp = priceMap[aptName];
-        String? matchedApiName = mp != null ? aptName : null;
-        if (mp == null) {
-          for (final entry in priceMap.entries) {
-            if (entry.key.contains(aptName) || aptName.contains(entry.key)) {
-              mp = entry.value;
-              matchedApiName = entry.key;
-              break;
-            }
-          }
-        }
-        if (mp == null) {
-          final normApt = _normalizeAptName(aptName);
-          for (final entry in priceMap.entries) {
-            final normKey = _normalizeAptName(entry.key);
-            if (normKey == normApt ||
-                normKey.contains(normApt) ||
-                normApt.contains(normKey) ||
-                _sharesCoreSubstring(normApt, normKey)) {
-              mp = entry.value;
-              matchedApiName = entry.key;
-              break;
-            }
-          }
-        }
-
-        final icon = await _buildMarkerIcon(
-          apt,
-          priceLabel: mp?.priceLabel ?? '',
-          pyeongLabel: mp?.pyeongLabel ?? '',
-        );
-        if (icon != null) {
-          marker.setIcon(icon);
-          marker.setAnchor(const NPoint(0.5, 1.0));
-        }
-
-        marker.setCaption(
-          NOverlayCaption(
-            text: apt.kaptName,
-            textSize: 10,
-            color: kTextMuted,
-            haloColor: Colors.white,
-          ),
-        );
-
-        marker.setOnTapListener((_) {
-          _showPropertyInfoSheet(
-            pos,
-            apt.kaptName,
-            lawdCd: apt.bjdCode.length >= 5
-                ? apt.bjdCode.substring(0, 5)
-                : apt.bjdCode,
-            apt: apt,
-            apiName: matchedApiName,
-          );
-          return true;
-        });
-
-        markers.add(marker);
-      }
-
-      // await 이후 컨트롤러가 무효화될 수 있으므로 재확인
-      if (!mounted || _mapController == null) return;
-
-      // ── 2단계: addOverlayAll()로 한 번에 지도에 추가 ──────────────────────
-      await _mapController!.addOverlayAll(markers.toSet());
-      for (final m in markers) {
-        _aptMarkerMap[m.info.id] = m;
-      }
-
-      debugPrint('[MapScreen] 마커 렌더링 완료 — 신규 ${markers.length}개, 총 ${_aptMarkerMap.length}개');
+      apts = await ApartmentRepository.instance.getApartmentsByBjdCode(bjdCode);
+      if (!mounted || generation != _renderGeneration) return;
     } catch (e) {
-      debugPrint('[MapScreen] 마커 렌더링 오류: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('단지 정보를 불러오지 못했습니다.')));
-      }
-    } finally {
-      if (mounted) setState(() => _isMarkersLoading = false);
+      debugPrint('[MapScreen] 아파트 목록 로드 실패 bjdCode=$bjdCode: $e');
+      return;
+    }
+
+    await _addBasicMarkers(apts, bjdCode, lawdCd, generation);
+    if (!mounted || generation != _renderGeneration) return;
+
+    // ── Phase 2: 실거래가 백그라운드 로드 → 마커 아이콘 교체 ─────────────
+    // fire-and-forget: await 하지 않아 _onCameraIdle을 블로킹하지 않음
+    _loadAndApplyPrices(apts, lawdCd, generation);
+  }
+
+  // ── Phase 1: 기본 마커 일괄 추가 (가격 아이콘 없이 빠르게) ────────────────
+  // NOverlayImage.fromWidget을 사용하지 않아 즉각 렌더링 가능.
+  Future<void> _addBasicMarkers(
+    List<ApartmentInfo> apts,
+    String bjdCode,
+    String lawdCd,
+    int generation,
+  ) async {
+    if (!mounted || _mapController == null) return;
+
+    final newMarkers = <NMarker>[];
+    for (final apt in apts.where((a) => a.hasValidCoords)) {
+      if (!mounted || generation != _renderGeneration) return;
+      if (_aptMarkerMap.containsKey(apt.kaptCode)) continue; // Diffing
+
+      final pos = NLatLng(apt.lat, apt.lng);
+      final marker = NMarker(id: apt.kaptCode, position: pos);
+
+      // 기본 마커: 캡션(단지명)만, 커스텀 아이콘 없음 → 즉시 표시 가능
+      marker.setCaption(
+        NOverlayCaption(
+          text: apt.kaptName,
+          textSize: 10,
+          color: kTextMuted,
+          haloColor: Colors.white,
+        ),
+      );
+      marker.setOnTapListener((_) {
+        _showPropertyInfoSheet(pos, apt.kaptName, lawdCd: lawdCd, apt: apt);
+        return true;
+      });
+
+      newMarkers.add(marker);
+    }
+
+    if (!mounted || _mapController == null || generation != _renderGeneration) return;
+    if (newMarkers.isEmpty) {
+      debugPrint('[MapScreen] bjdCode=$bjdCode — 신규 마커 없음');
+      return;
+    }
+
+    await _mapController!.addOverlayAll(newMarkers.toSet());
+    for (final m in newMarkers) {
+      _aptMarkerMap[m.info.id] = m;
+      _kaptCodeToBjdCode[m.info.id] = bjdCode;
+    }
+    debugPrint('[MapScreen] bjdCode=$bjdCode 기본 마커 ${newMarkers.length}개 즉시 표시');
+  }
+
+  // ── Phase 2A: 최근 3개월 가격 → 즉시 아이콘 / Phase 2B: 나머지 9개월 백그라운드 ──
+  Future<void> _loadAndApplyPrices(
+    List<ApartmentInfo> apts,
+    String lawdCd,
+    int generation,
+  ) async {
+    // Phase 2A: 최근 3개월 (빠름, ~3 API 호출)
+    final fastMap = await _getFastPriceMap(lawdCd);
+    if (!mounted || generation != _renderGeneration) return;
+
+    if (fastMap.isNotEmpty) {
+      await _applyPriceIcons(apts, fastMap, lawdCd, generation);
+      if (!mounted || generation != _renderGeneration) return;
+    }
+
+    // Phase 2B: 이전 9개월 백그라운드 — 아직 가격 없는 단지만 보완
+    final unmatched = apts
+        .where((a) =>
+            _aptMarkerMap.containsKey(a.kaptCode) &&
+            _findPriceMatch(fastMap, a.kaptName.trim()) == null)
+        .toList();
+    if (unmatched.isNotEmpty) {
+      _loadSupplementalPrices(unmatched, lawdCd, generation);
     }
   }
 
+  /// 보완 가격(4~12개월)을 백그라운드 로드 → 미매칭 단지 아이콘 업데이트.
+  Future<void> _loadSupplementalPrices(
+    List<ApartmentInfo> unmatched,
+    String lawdCd,
+    int generation,
+  ) async {
+    final suppMap = await _getSupplementalPriceMap(lawdCd);
+    if (!mounted || generation != _renderGeneration || suppMap.isEmpty) return;
+    await _applyPriceIcons(unmatched, suppMap, lawdCd, generation);
+    debugPrint('[MapScreen] $lawdCd 보완 가격 ${unmatched.length}개 대상 업데이트');
+  }
+
+  /// [priceMap] 기준으로 [apts] 매칭 마커 아이콘을 말풍선으로 교체. 10개씩 병렬.
+  Future<void> _applyPriceIcons(
+    List<ApartmentInfo> apts,
+    Map<String, _MarkerPrice> priceMap,
+    String lawdCd,
+    int generation,
+  ) async {
+    final matched = <({ApartmentInfo apt, _MarkerPrice mp, String? apiName})>[];
+    for (final apt in apts) {
+      final mp = _findPriceMatch(priceMap, apt.kaptName.trim());
+      if (mp != null) {
+        matched.add((
+          apt: apt,
+          mp: mp,
+          apiName: _findMatchedKey(priceMap, apt.kaptName.trim()),
+        ));
+      }
+    }
+    if (matched.isEmpty) return;
+
+    const chunkSize = 10;
+    for (var i = 0; i < matched.length; i += chunkSize) {
+      if (!mounted || generation != _renderGeneration) return;
+      final chunk = matched.sublist(i, (i + chunkSize).clamp(0, matched.length));
+      await Future.wait(chunk.map((item) async {
+        if (!mounted || generation != _renderGeneration) return;
+        final marker = _aptMarkerMap[item.apt.kaptCode];
+        if (marker == null) return;
+
+        final icon = await _buildMarkerIcon(
+          item.apt,
+          priceLabel: item.mp.priceLabel,
+          pyeongLabel: item.mp.pyeongLabel,
+        );
+        if (!mounted || generation != _renderGeneration || icon == null) return;
+
+        marker.setIcon(icon);
+        marker.setAnchor(const NPoint(0.5, 1.0));
+
+        final pos = marker.position;
+        final lcd = item.apt.bjdCode.length >= 5
+            ? item.apt.bjdCode.substring(0, 5)
+            : item.apt.bjdCode;
+        marker.setOnTapListener((_) {
+          _showPropertyInfoSheet(
+            pos,
+            item.apt.kaptName,
+            lawdCd: lcd,
+            apt: item.apt,
+            apiName: item.apiName,
+          );
+          return true;
+        });
+      }));
+    }
+    debugPrint('[MapScreen] $lawdCd 가격 아이콘 ${matched.length}개 교체');
+  }
+
+  // ── 단지명 기반 가격 매칭 헬퍼 ────────────────────────────────────────────
+  _MarkerPrice? _findPriceMatch(
+    Map<String, _MarkerPrice> priceMap,
+    String aptName,
+  ) {
+    if (priceMap.containsKey(aptName)) return priceMap[aptName];
+    for (final e in priceMap.entries) {
+      if (e.key.contains(aptName) || aptName.contains(e.key)) return e.value;
+    }
+    final norm = _normalizeAptName(aptName);
+    for (final e in priceMap.entries) {
+      final normKey = _normalizeAptName(e.key);
+      if (normKey == norm ||
+          normKey.contains(norm) ||
+          norm.contains(normKey) ||
+          _sharesCoreSubstring(norm, normKey)) {
+        return e.value;
+      }
+    }
+    return null;
+  }
+
+  String? _findMatchedKey(
+    Map<String, _MarkerPrice> priceMap,
+    String aptName,
+  ) {
+    if (priceMap.containsKey(aptName)) return aptName;
+    for (final key in priceMap.keys) {
+      if (key.contains(aptName) || aptName.contains(key)) return key;
+    }
+    final norm = _normalizeAptName(aptName);
+    for (final key in priceMap.keys) {
+      final normKey = _normalizeAptName(key);
+      if (normKey == norm ||
+          normKey.contains(norm) ||
+          norm.contains(normKey) ||
+          _sharesCoreSubstring(norm, normKey)) {
+        return key;
+      }
+    }
+    return null;
+  }
+
+  // ── 실거래가 캐시 (Future를 저장해 동시 요청도 API 1회만 호출) ──────────────
+  Future<Map<String, _MarkerPrice>> _getFastPriceMap(String lawdCd) =>
+      _fastPriceMapCache.putIfAbsent(
+        lawdCd,
+        () => _fetchDistrictMonths(lawdCd, startOffset: 0, count: 3, numOfRows: 1000),
+      );
+
+  Future<Map<String, _MarkerPrice>> _getSupplementalPriceMap(String lawdCd) =>
+      _supplementalPriceMapCache.putIfAbsent(
+        lawdCd,
+        () => _fetchDistrictMonths(lawdCd, startOffset: 3, count: 9, numOfRows: 200),
+      );
+
   void _onMapTapped(NPoint point, NLatLng latLng) {
     // 맵 빈 곳 터치 시 드롭다운/키보드 닫기만 처리.
-    // 바텀시트는 아파트 마커 탭 리스너(_renderAptMarkers)에서 열립니다.
+    // 바텀시트는 아파트 마커 탭 리스너(_fetchAndRenderBjdCode)에서 열립니다.
     if (_showDropdown) {
       FocusScope.of(context).unfocus();
       setState(() => _showDropdown = false);
@@ -678,62 +885,61 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── Property Info Sheet ──────────────────────────────────────────────────
 
-  /// 지역 실거래 데이터를 로드해 단지명 → 가격/평수 맵으로 반환.
-  Future<Map<String, _MarkerPrice>> _fetchDistrictPriceMap(
-    String lawdCd,
-  ) async {
+  /// [startOffset]달 전부터 [count]개월치 실거래 데이터를 가져와 단지명→가격/평수 맵 반환.
+  /// - startOffset=0, count=3 → 이번달~2개월 전 (빠른 Path)
+  /// - startOffset=3, count=9 → 3~11개월 전 (보완 Path)
+  Future<Map<String, _MarkerPrice>> _fetchDistrictMonths(
+    String lawdCd, {
+    required int startOffset,
+    required int count,
+    required int numOfRows,
+  }) async {
     try {
       final svc = const PublicDataService();
       final now = DateTime.now();
 
-      // 최근 12개월치 YYYYMM 리스트 (이번달 포함)
-      // 최근 3개월: 1000건 (정확도 우선), 이전 9개월: 200건 (거래 빈도 낮은 단지 보충용)
-      final ymds = List.generate(12, (i) {
-        final d = DateTime(now.year, now.month - i);
+      final ymds = List.generate(count, (i) {
+        final d = DateTime(now.year, now.month - startOffset - i);
         return '${d.year}${d.month.toString().padLeft(2, '0')}';
       });
 
       final results = await Future.wait(
-        ymds.asMap().entries.map((e) => svc.fetchAptTrades(
+        ymds.map((ymd) => svc.fetchAptTrades(
           lawdCd: lawdCd,
-          dealYmd: e.value,
-          numOfRows: e.key < 3 ? 1000 : 200,
+          dealYmd: ymd,
+          numOfRows: numOfRows,
         )),
       );
 
-      for (int i = 0; i < ymds.length; i++) {
-        debugPrint('[MapScreen] priceMap ${ymds[i]}=${results[i].records.length}건');
-      }
-
-      // 최신 달부터 순서대로, 단지별로 가장 최근 달의 거래만 사용
-      // results[0]=이번달, results[1]=지난달, ... results[5]=6개월 전
-      final grouped = <String, List<AptTradeRecord>>{};
+      // 단지별 최근 실거래 1건 — 날짜(년·월·일) 내림차순 정렬 후 첫 번째 레코드
+      final latestByComplex = <String, AptTradeRecord>{};
       for (final data in results) {
-        // 이번 달 데이터를 단지별로 모음 (같은 달 내 여러 건 → 평균)
-        final monthGroup = <String, List<AptTradeRecord>>{};
         for (final r in data.records) {
           if (r.price <= 0) continue;
-          monthGroup.putIfAbsent(r.complexName.trim(), () => []).add(r);
-        }
-        // 아직 grouped에 없는 단지만 이번 달 데이터로 채움
-        for (final entry in monthGroup.entries) {
-          if (!grouped.containsKey(entry.key)) {
-            grouped[entry.key] = entry.value;
+          final name = r.complexName.trim();
+          final existing = latestByComplex[name];
+          if (existing == null ||
+              r.dealYear > existing.dealYear ||
+              (r.dealYear == existing.dealYear && r.dealMonth > existing.dealMonth) ||
+              (r.dealYear == existing.dealYear &&
+                  r.dealMonth == existing.dealMonth &&
+                  r.dealDay > existing.dealDay)) {
+            latestByComplex[name] = r;
           }
         }
       }
 
       final map = <String, _MarkerPrice>{};
-      for (final entry in grouped.entries) {
-        final recs = entry.value;
-        final avgPrice = recs.map((r) => r.price).reduce((a, b) => a + b) ~/ recs.length;
-        final avgArea = recs.map((r) => r.area).reduce((a, b) => a + b) / recs.length;
+      for (final entry in latestByComplex.entries) {
+        final r = entry.value;
         map[entry.key] = _MarkerPrice(
-          priceLabel: _fmtPrice(avgPrice),
-          pyeongLabel: '${(avgArea / 3.30579).round()}평',
+          priceLabel: _fmtPrice(r.price),
+          pyeongLabel: '${(r.area / 3.30579).round()}평',
         );
       }
-      debugPrint('[MapScreen] priceMap 완료 — ${map.length}개 단지');
+      debugPrint(
+        '[MapScreen] priceMap($lawdCd, offset=$startOffset, n=$count) → ${map.length}개 단지',
+      );
       return map;
     } catch (e) {
       debugPrint('[MapScreen] priceMap 로드 실패: $e');
@@ -1781,10 +1987,12 @@ class _PriceTabState extends State<_PriceTab> {
       if (mounted) setState(() {}); // 배치마다 점진적 업데이트
     }
 
-    if (mounted) setState(() {
-      _isLoading = false;
-      _years = targetYears;
-    });
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+        _years = targetYears;
+      });
+    }
   }
 
   Future<void> _fetchMonth(String yyyymm) async {
@@ -2248,7 +2456,7 @@ class _PriceChartPainter extends CustomPainter {
   String _priceLabel(int price) {
     final eok = price ~/ 10000;
     final man = (price % 10000 + 500) ~/ 1000; // 천만 단위 반올림
-    if (eok > 0 && man > 0) return '$eok억\n${man}천';
+    if (eok > 0 && man > 0) return '$eok억\n$man천';
     if (eok > 0) return '$eok억';
     return '${(price + 500) ~/ 1000}천만';
   }
