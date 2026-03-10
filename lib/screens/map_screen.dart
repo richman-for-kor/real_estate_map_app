@@ -333,8 +333,7 @@ class _MapScreenState extends State<MapScreen> {
 
   Future<void> _onCameraIdle() async {
     if (_mapController == null) return;
-    final position = await _mapController!.getCameraPosition();
-    final zoom = position.zoom;
+    final zoom = (await _mapController!.getCameraPosition()).zoom;
     debugPrint('[CameraIdle] zoom=${zoom.toStringAsFixed(1)}');
 
     // 줌 12 미만 → 마커 전체 제거
@@ -354,7 +353,7 @@ class _MapScreenState extends State<MapScreen> {
 
     // 렌더/삭제 기준: 화면 bounds + 0.01° 버퍼 (가장자리 깜빡임 방지)
     const buf = 0.01;
-    final renderBounds = NLatLngBounds(
+    final removeBounds = NLatLngBounds(
       southWest: NLatLng(
         contentBounds.southWest.latitude - buf,
         contentBounds.southWest.longitude - buf,
@@ -366,47 +365,59 @@ class _MapScreenState extends State<MapScreen> {
     );
 
     // ── 화면 밖 마커 정확히 제거 ───────────────────────────────────────────
-    await _removeOutOfBoundsMarkers(renderBounds);
+    await _removeOutOfBoundsMarkers(removeBounds);
 
-    // ── 4×4 그리드 샘플링 — 화면 구석 법정동 누락 방지 ────────────────────
+    // ── 4×4 그리드 좌표 수집 → Future.wait 병렬 역지오코딩 ─────────────────
     final sw = contentBounds.southWest;
     final ne = contentBounds.northEast;
     const divisions = 3; // 0~3 → 4×4 = 16 포인트
-    final newBjdCodes = <String>{};
+    final samplePoints = <NLatLng>[];
     for (var r = 0; r <= divisions; r++) {
       for (var c = 0; c <= divisions; c++) {
-        if (!mounted) return;
-        final lat = sw.latitude + (ne.latitude - sw.latitude) * r / divisions;
-        final lng = sw.longitude + (ne.longitude - sw.longitude) * c / divisions;
-        final bjdCode = await _getCachedBjdCode(lat, lng);
-        if (bjdCode != null && !_loadedBjdCodes.contains(bjdCode)) {
-          newBjdCodes.add(bjdCode);
-        }
+        samplePoints.add(NLatLng(
+          sw.latitude + (ne.latitude - sw.latitude) * r / divisions,
+          sw.longitude + (ne.longitude - sw.longitude) * c / divisions,
+        ));
+      }
+    }
+
+    if (!mounted) return;
+
+    // 16개 좌표 병렬 조회 — 순차 await 제거로 API 병목 해소
+    final bjdResults = await Future.wait(
+      samplePoints.map((pt) => _getCachedBjdCode(pt.latitude, pt.longitude)),
+    );
+
+    final newBjdCodes = <String>{};
+    for (final code in bjdResults) {
+      if (code != null && !_loadedBjdCodes.contains(code)) {
+        newBjdCodes.add(code);
       }
     }
 
     if (newBjdCodes.isEmpty) return;
 
-    // ── generation 카운터 증가 → 이전 렌더 작업 무효화 ───────────────────────
+    // 선점: 모든 신규 bjdCode를 먼저 등록 → 중복 요청 방지
+    for (final bjdCode in newBjdCodes) {
+      _loadedBjdCodes.add(bjdCode);
+    }
+
+    // generation 증가 — 실거래가 아이콘(Phase 2) 취소용으로만 사용
     final generation = ++_renderGeneration;
 
     // 초기 로드일 때만 로딩 배지 표시
     final showLoading = _isInitialLoad;
     if (showLoading && mounted) setState(() => _isMarkersLoading = true);
 
-    try {
-      for (final bjdCode in newBjdCodes) {
-        if (!mounted || generation != _renderGeneration) return;
-        // 선점: 중복 요청 방지 (실패/취소 시 _fetchAndRenderBjdCode에서 rollback)
-        _loadedBjdCodes.add(bjdCode);
-        await _fetchAndRenderBjdCode(bjdCode, generation, renderBounds);
-      }
-    } finally {
+    // 모든 bjdCode 병렬 렌더링 — 순차 await 제거로 UI 블로킹 해소
+    Future.wait(
+      newBjdCodes.map((bjdCode) => _fetchAndRenderBjdCode(bjdCode, generation)),
+    ).whenComplete(() {
       if (showLoading) {
         _isInitialLoad = false;
         if (mounted) setState(() => _isMarkersLoading = false);
       }
-    }
+    });
   }
 
   // ── 뷰포트 밖 마커 정확히 제거 — getContentBounds() 기반 ──────────────────
@@ -532,71 +543,70 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── Phase-1: 아파트 목록만 즉시 렌더링 → Phase-2: 백그라운드 가격 업데이트 ──
   //
-  // 이전 방식: Future.wait([apts, priceMap]) → 실거래가 완료 전까지 마커 0개
-  // 새 방식  : apts 완료 즉시 기본 마커 표시 → 가격 로드 완료 후 아이콘 교체
-  Future<void> _fetchAndRenderBjdCode(
-    String bjdCode,
-    int generation,
-    NLatLngBounds renderBounds,
-  ) async {
-    if (!mounted || _mapController == null) {
-      _loadedBjdCodes.remove(bjdCode); // 롤백
-      return;
-    }
+  // generation 체크 없음: 한 번 등록된 bjdCode는 무조건 끝까지 렌더.
+  // 화면 밖 마커는 다음 _removeOutOfBoundsMarkers 호출 시 정확히 제거됨.
+  Future<void> _fetchAndRenderBjdCode(String bjdCode, int generation) async {
+    if (!mounted || _mapController == null) return;
     final lawdCd = bjdCode.length >= 5 ? bjdCode.substring(0, 5) : bjdCode;
 
-    // ── Phase 1: 단지 목록 로드 → 기본 마커 즉시 표시 ──────────────────────
+    // ── Phase 1: 단지 목록 로드 ──────────────────────────────────────────
     List<ApartmentInfo> apts;
     try {
       apts = await ApartmentRepository.instance.getApartmentsByBjdCode(bjdCode);
     } catch (e) {
       debugPrint('[MapScreen] 아파트 목록 로드 실패 bjdCode=$bjdCode: $e');
-      _loadedBjdCodes.remove(bjdCode); // 롤백
       return;
     }
 
-    // generation 이 바뀌었으면 마커를 그리지 않고 선점도 해제 (롤백)
-    if (!mounted || generation != _renderGeneration) {
-      _loadedBjdCodes.remove(bjdCode);
-      return;
+    if (!mounted || _mapController == null) return;
+
+    // 마커 추가 직전 최신 bounds 취득 — 지도 이동 후 stale bounds 방지
+    NLatLngBounds? renderBounds;
+    try {
+      final cb = await _mapController!.getContentBounds();
+      const buf = 0.01;
+      renderBounds = NLatLngBounds(
+        southWest: NLatLng(
+          cb.southWest.latitude - buf,
+          cb.southWest.longitude - buf,
+        ),
+        northEast: NLatLng(
+          cb.northEast.latitude + buf,
+          cb.northEast.longitude + buf,
+        ),
+      );
+    } catch (_) {
+      // bounds 취득 실패 시 필터 없이 전체 추가
     }
 
-    await _addBasicMarkers(apts, bjdCode, lawdCd, generation, renderBounds);
-
-    // 마커가 실제로 하나도 추가되지 않았으면 선점 해제 → 재시도 허용
-    if (!_kaptCodeToBjdCode.containsValue(bjdCode)) {
-      _loadedBjdCodes.remove(bjdCode);
-      return;
-    }
-
-    if (!mounted || generation != _renderGeneration) return;
+    await _addBasicMarkers(apts, bjdCode, lawdCd, renderBounds);
+    if (!mounted) return;
 
     // ── Phase 2: 실거래가 백그라운드 로드 → 마커 아이콘 교체 ─────────────
-    // fire-and-forget: await 하지 않아 _onCameraIdle을 블로킹하지 않음
+    // fire-and-forget: await 하지 않아 병렬 렌더링 흐름을 블로킹하지 않음
     _loadAndApplyPrices(apts, lawdCd, generation);
   }
 
   // ── Phase 1: 기본 마커 일괄 추가 (가격 아이콘 없이 빠르게) ────────────────
   // NOverlayImage.fromWidget을 사용하지 않아 즉각 렌더링 가능.
-  // renderBounds 범위 밖 좌표는 추가하지 않아 화면 밖 렌더링 방지.
+  // renderBounds(nullable): 비null이면 화면 밖 좌표 필터링, null이면 전체 추가.
+  // generation 체크 없음: 무조건 끝까지 렌더 → 화면 밖 마커는 removeOutOfBounds가 정리.
   Future<void> _addBasicMarkers(
     List<ApartmentInfo> apts,
     String bjdCode,
     String lawdCd,
-    int generation,
-    NLatLngBounds renderBounds,
+    NLatLngBounds? renderBounds,
   ) async {
     if (!mounted || _mapController == null) return;
 
     final newMarkers = <NMarker>[];
     for (final apt in apts.where((a) => a.hasValidCoords)) {
-      if (!mounted || generation != _renderGeneration) return;
       if (_aptMarkerMap.containsKey(apt.kaptCode)) continue; // Diffing
 
       final pos = NLatLng(apt.lat, apt.lng);
 
       // 화면(+버퍼) 밖이면 마커 추가 생략 → 과도한 렌더링 방지
-      if (!_boundsContains(renderBounds, pos)) continue;
+      if (renderBounds != null && !_boundsContains(renderBounds, pos)) continue;
 
       final marker = NMarker(id: apt.kaptCode, position: pos);
 
@@ -617,7 +627,7 @@ class _MapScreenState extends State<MapScreen> {
       newMarkers.add(marker);
     }
 
-    if (!mounted || _mapController == null || generation != _renderGeneration) return;
+    if (!mounted || _mapController == null) return;
     if (newMarkers.isEmpty) {
       debugPrint('[MapScreen] bjdCode=$bjdCode — 신규 마커 없음');
       return;
