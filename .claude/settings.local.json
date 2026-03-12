@@ -29,7 +29,9 @@
       "Bash(firebase:*)",
       "Bash(yes:*)",
       "Bash(npm install:*)",
-      "Bash(sleep 30 && flutter logs -d R3CR10ZYHNY 2>&1 | head -200)"
+      "Bash(sleep 30 && flutter logs -d R3CR10ZYHNY 2>&1 | head -200)",
+      "WebFetch(domain:apis.data.go.kr)",
+      "WebFetch(domain:dapi.kakao.com)"
     ]
   }
 }

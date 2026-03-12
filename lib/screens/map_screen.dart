@@ -46,8 +46,18 @@ const _kCardBg = Colors.white;
 
 // ─── 아파트 단지명 정규화 (파일 레벨 — MapScreen + PropertyInfoSheet 공용) ────
 /// 법정동 접두사·괄호·공백·차/단지 suffix 제거, LG↔엘지 통합.
+/// 공공 API가 관리사무소명으로 등록한 단지 처리 ("아파트 관리사무소" 등 suffix 제거).
 String _normalizeAptName(String name) {
   var n = name;
+  // 공공 API 데이터 품질 문제: "XX아파트 관리사무소" 형태로 등록된 경우 suffix 제거
+  for (final suffix in const [
+    ' 아파트 관리사무소', '아파트관리사무소', ' 관리사무소', '관리사무소',
+  ]) {
+    if (n.endsWith(suffix)) {
+      n = n.substring(0, n.length - suffix.length);
+      break;
+    }
+  }
   for (final prefix in const [
     '정자', '구미', '분당', '수내', '서현', '이매', '판교',
     '야탑', '금곡', '중앙', '보평', '장안', '율동', '동판교',
@@ -62,6 +72,7 @@ String _normalizeAptName(String name) {
   n = n.replaceAll('LG', '엘지').replaceAll('lg', '엘지');
   return n;
 }
+
 
 /// 정규화된 두 이름이 minLen자 이상의 공통 부분 문자열을 공유하는지 확인.
 bool _sharesCoreSubstring(String a, String b, {int minLen = 3}) {
@@ -120,6 +131,11 @@ class _MapScreenState extends State<MapScreen> {
   // 검색 상태 관리
   Timer? _debounce;
   bool _isSearching = false;
+
+  // 카메라 유휴 디바운스 (API 호출 방지)
+  Timer? _debounceTimer;
+  // 줌 부족 SnackBar 마지막 표시 시각 (너무 자주 뜨지 않도록)
+  DateTime? _lastZoomSnackBarTime;
   bool _showDropdown = false;
   List<dynamic> _searchResults = [];
 
@@ -138,8 +154,6 @@ class _MapScreenState extends State<MapScreen> {
   final Map<String, Future<Map<String, _MarkerPrice>>> _fastPriceMapCache = {};
   /// lawdCd → 이전 4~12개월 실거래가 Future 캐시 (미매칭 단지 보완용).
   final Map<String, Future<Map<String, _MarkerPrice>>> _supplementalPriceMapCache = {};
-  /// 렌더링 세대(generation) 카운터 — 이전 렌더 요청을 취소하는 데 사용.
-  int _renderGeneration = 0;
   /// 앱 첫 로드 여부 — true일 때만 로딩 배지를 표시.
   bool _isInitialLoad = true;
 
@@ -178,6 +192,7 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     widget.jumpTarget?.removeListener(_onJumpTarget);
     _debounce?.cancel();
+    _debounceTimer?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -331,14 +346,39 @@ class _MapScreenState extends State<MapScreen> {
     if (!moved && mounted) _onCameraIdle();
   }
 
-  Future<void> _onCameraIdle() async {
+  void _onCameraIdle() {
+    // ── 디바운스: 연속 카메라 이동 시 500ms 이내 중복 호출 무시 ───────────
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 500), () async {
+      await _onCameraIdleDebounced();
+    });
+  }
+
+  Future<void> _onCameraIdleDebounced() async {
     if (_mapController == null) return;
     final zoom = (await _mapController!.getCameraPosition()).zoom;
     debugPrint('[CameraIdle] zoom=${zoom.toStringAsFixed(1)}');
 
-    // 줌 12 미만 → 마커 전체 제거
-    if (zoom < 12) {
+    // ── 줌 13 미만 → 마커 전체 제거 + SnackBar 안내 ──────────────────────
+    if (zoom < 13) {
       await _clearAllAptMarkers();
+
+      // SnackBar: 마지막 표시로부터 3초 이상 경과했을 때만 노출 (과다 노출 방지)
+      final now = DateTime.now();
+      final lastShown = _lastZoomSnackBarTime;
+      if (lastShown == null ||
+          now.difference(lastShown).inSeconds >= 3) {
+        _lastZoomSnackBarTime = now;
+        if (mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('아파트 단지를 보려면 지도를 더 확대해 주세요.'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      }
       return;
     }
 
@@ -402,16 +442,13 @@ class _MapScreenState extends State<MapScreen> {
       _loadedBjdCodes.add(bjdCode);
     }
 
-    // generation 증가 — 실거래가 아이콘(Phase 2) 취소용으로만 사용
-    final generation = ++_renderGeneration;
-
     // 초기 로드일 때만 로딩 배지 표시
     final showLoading = _isInitialLoad;
     if (showLoading && mounted) setState(() => _isMarkersLoading = true);
 
     // 모든 bjdCode 병렬 렌더링 — 순차 await 제거로 UI 블로킹 해소
     Future.wait(
-      newBjdCodes.map((bjdCode) => _fetchAndRenderBjdCode(bjdCode, generation)),
+      newBjdCodes.map((bjdCode) => _fetchAndRenderBjdCode(bjdCode)),
     ).whenComplete(() {
       if (showLoading) {
         _isInitialLoad = false;
@@ -543,9 +580,9 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── Phase-1: 아파트 목록만 즉시 렌더링 → Phase-2: 백그라운드 가격 업데이트 ──
   //
-  // generation 체크 없음: 한 번 등록된 bjdCode는 무조건 끝까지 렌더.
+  // 한 번 등록된 bjdCode는 무조건 끝까지 렌더.
   // 화면 밖 마커는 다음 _removeOutOfBoundsMarkers 호출 시 정확히 제거됨.
-  Future<void> _fetchAndRenderBjdCode(String bjdCode, int generation) async {
+  Future<void> _fetchAndRenderBjdCode(String bjdCode) async {
     if (!mounted || _mapController == null) return;
     final lawdCd = bjdCode.length >= 5 ? bjdCode.substring(0, 5) : bjdCode;
 
@@ -584,13 +621,13 @@ class _MapScreenState extends State<MapScreen> {
 
     // ── Phase 2: 실거래가 백그라운드 로드 → 마커 아이콘 교체 ─────────────
     // fire-and-forget: await 하지 않아 병렬 렌더링 흐름을 블로킹하지 않음
-    _loadAndApplyPrices(apts, lawdCd, generation);
+    _loadAndApplyPrices(apts, lawdCd);
   }
 
   // ── Phase 1: 기본 마커 일괄 추가 (가격 아이콘 없이 빠르게) ────────────────
   // NOverlayImage.fromWidget을 사용하지 않아 즉각 렌더링 가능.
   // renderBounds(nullable): 비null이면 화면 밖 좌표 필터링, null이면 전체 추가.
-  // generation 체크 없음: 무조건 끝까지 렌더 → 화면 밖 마커는 removeOutOfBounds가 정리.
+  // 무조건 끝까지 렌더 → 화면 밖 마커는 _removeOutOfBoundsMarkers가 정리.
   Future<void> _addBasicMarkers(
     List<ApartmentInfo> apts,
     String bjdCode,
@@ -610,17 +647,18 @@ class _MapScreenState extends State<MapScreen> {
 
       final marker = NMarker(id: apt.kaptCode, position: pos);
 
+      final displayName = apt.kakaoName ?? apt.kaptName;
       // 기본 마커: 캡션(단지명)만, 커스텀 아이콘 없음 → 즉시 표시 가능
       marker.setCaption(
         NOverlayCaption(
-          text: apt.kaptName,
+          text: displayName,
           textSize: 10,
           color: kTextMuted,
           haloColor: Colors.white,
         ),
       );
       marker.setOnTapListener((_) {
-        _showPropertyInfoSheet(pos, apt.kaptName, lawdCd: lawdCd, apt: apt);
+        _showPropertyInfoSheet(pos, displayName, lawdCd: lawdCd, apt: apt);
         return true;
       });
 
@@ -641,42 +679,88 @@ class _MapScreenState extends State<MapScreen> {
     debugPrint('[MapScreen] bjdCode=$bjdCode 기본 마커 ${newMarkers.length}개 즉시 표시');
   }
 
-  // ── Phase 2A: 최근 3개월 가격 → 즉시 아이콘 / Phase 2B: 나머지 9개월 백그라운드 ──
+  // ── Phase 2: 가격 로드 → 아이콘 교체 (A→B→C 순서로 진행) ────────────────
+  // Phase 2A: 최근 3개월 fast path
+  // Phase 2B: 3~12개월 supplemental (2A에서 미매칭 단지만)
+  // Phase 2C: 12개월 전체 미매칭 → 빈 말풍선("시세없음")으로 교체
   Future<void> _loadAndApplyPrices(
     List<ApartmentInfo> apts,
     String lawdCd,
-    int generation,
   ) async {
     // Phase 2A: 최근 3개월 (빠름, ~3 API 호출)
     final fastMap = await _getFastPriceMap(lawdCd);
-    if (!mounted || generation != _renderGeneration) return;
+    if (!mounted) return;
 
     if (fastMap.isNotEmpty) {
-      await _applyPriceIcons(apts, fastMap, lawdCd, generation);
-      if (!mounted || generation != _renderGeneration) return;
+      await _applyPriceIcons(apts, fastMap, lawdCd);
+      if (!mounted) return;
     }
 
-    // Phase 2B: 이전 9개월 백그라운드 — 아직 가격 없는 단지만 보완
-    final unmatched = apts
+    // Phase 2B: 이전 9개월 — 아직 가격 없는 단지만 보완
+    final afterFast = apts
         .where((a) =>
             _aptMarkerMap.containsKey(a.kaptCode) &&
             _findPriceMatch(fastMap, a.kaptName.trim()) == null)
         .toList();
-    if (unmatched.isNotEmpty) {
-      _loadSupplementalPrices(unmatched, lawdCd, generation);
+
+    Map<String, _MarkerPrice> suppMap = {};
+    if (afterFast.isNotEmpty) {
+      suppMap = await _getSupplementalPriceMap(lawdCd);
+      if (!mounted) return;
+      if (suppMap.isNotEmpty) {
+        await _applyPriceIcons(afterFast, suppMap, lawdCd);
+        if (!mounted) return;
+        debugPrint('[MapScreen] $lawdCd 보완 가격 ${afterFast.length}개 대상 업데이트');
+      }
+    }
+
+    // Phase 2C: 12개월 전체 조회 후에도 가격 없는 단지 → 빈 말풍선으로 교체
+    final noPrice = apts
+        .where((a) =>
+            _aptMarkerMap.containsKey(a.kaptCode) &&
+            _findPriceMatch(fastMap, a.kaptName.trim()) == null &&
+            _findPriceMatch(suppMap, a.kaptName.trim()) == null)
+        .toList();
+    if (noPrice.isNotEmpty) {
+      await _applyEmptyBubbles(noPrice, lawdCd);
     }
   }
 
-  /// 보완 가격(4~12개월)을 백그라운드 로드 → 미매칭 단지 아이콘 업데이트.
-  Future<void> _loadSupplementalPrices(
-    List<ApartmentInfo> unmatched,
+  /// 가격 정보 없는 단지에 빈 말풍선("시세없음") 아이콘 적용.
+  Future<void> _applyEmptyBubbles(
+    List<ApartmentInfo> apts,
     String lawdCd,
-    int generation,
   ) async {
-    final suppMap = await _getSupplementalPriceMap(lawdCd);
-    if (!mounted || generation != _renderGeneration || suppMap.isEmpty) return;
-    await _applyPriceIcons(unmatched, suppMap, lawdCd, generation);
-    debugPrint('[MapScreen] $lawdCd 보완 가격 ${unmatched.length}개 대상 업데이트');
+    const chunkSize = 10;
+    int count = 0;
+    for (var i = 0; i < apts.length; i += chunkSize) {
+      if (!mounted) return;
+      final chunk = apts.sublist(i, (i + chunkSize).clamp(0, apts.length));
+      await Future.wait(chunk.map((apt) async {
+        if (!mounted) return;
+        final marker = _aptMarkerMap[apt.kaptCode];
+        if (marker == null) return;
+
+        // priceLabel·pyeongLabel 비워두면 _AptPriceBubble이 "시세없음" 표시
+        final icon = await _buildMarkerIcon(apt);
+        if (!mounted || icon == null) return;
+
+        marker.setIcon(icon);
+        marker.setAnchor(const NPoint(0.5, 1.0));
+
+        final pos = marker.position;
+        final lcd = apt.bjdCode.length >= 5
+            ? apt.bjdCode.substring(0, 5)
+            : apt.bjdCode;
+        final displayName = apt.kakaoName ?? apt.kaptName;
+        marker.setOnTapListener((_) {
+          _showPropertyInfoSheet(pos, displayName, lawdCd: lcd, apt: apt);
+          return true;
+        });
+        count++;
+      }));
+    }
+    debugPrint('[MapScreen] $lawdCd 빈 말풍선 $count개 적용');
   }
 
   /// [priceMap] 기준으로 [apts] 매칭 마커 아이콘을 말풍선으로 교체. 10개씩 병렬.
@@ -684,7 +768,6 @@ class _MapScreenState extends State<MapScreen> {
     List<ApartmentInfo> apts,
     Map<String, _MarkerPrice> priceMap,
     String lawdCd,
-    int generation,
   ) async {
     final matched = <({ApartmentInfo apt, _MarkerPrice mp, String? apiName})>[];
     for (final apt in apts) {
@@ -701,10 +784,10 @@ class _MapScreenState extends State<MapScreen> {
 
     const chunkSize = 10;
     for (var i = 0; i < matched.length; i += chunkSize) {
-      if (!mounted || generation != _renderGeneration) return;
+      if (!mounted) return;
       final chunk = matched.sublist(i, (i + chunkSize).clamp(0, matched.length));
       await Future.wait(chunk.map((item) async {
-        if (!mounted || generation != _renderGeneration) return;
+        if (!mounted) return;
         final marker = _aptMarkerMap[item.apt.kaptCode];
         if (marker == null) return;
 
@@ -713,7 +796,7 @@ class _MapScreenState extends State<MapScreen> {
           priceLabel: item.mp.priceLabel,
           pyeongLabel: item.mp.pyeongLabel,
         );
-        if (!mounted || generation != _renderGeneration || icon == null) return;
+        if (!mounted || icon == null) return;
 
         marker.setIcon(icon);
         marker.setAnchor(const NPoint(0.5, 1.0));
@@ -722,10 +805,11 @@ class _MapScreenState extends State<MapScreen> {
         final lcd = item.apt.bjdCode.length >= 5
             ? item.apt.bjdCode.substring(0, 5)
             : item.apt.bjdCode;
+        final displayName = item.apt.kakaoName ?? item.apt.kaptName;
         marker.setOnTapListener((_) {
           _showPropertyInfoSheet(
             pos,
-            item.apt.kaptName,
+            displayName,
             lawdCd: lcd,
             apt: item.apt,
             apiName: item.apiName,
@@ -1016,7 +1100,7 @@ class _MapScreenState extends State<MapScreen> {
     // 최근 본 매물 자동 저장 (로그인 상태일 때만, silently)
     RecentViewService().addView(
       id: apt?.kaptCode.isNotEmpty == true ? apt!.kaptCode : label,
-      name: apt?.kaptName ?? label,
+      name: apt?.kakaoName ?? apt?.kaptName ?? label,
       address: apt?.kaptAddr ?? '',
       lat: pos.latitude,
       lng: pos.longitude,
@@ -1920,7 +2004,7 @@ class _ComplexInfoTab extends StatelessWidget {
 
         // 순서: 단지명, 건축년도, 세대수, 주차대수, 난방, 사용승인일, 저/최고층, 건설사, 도로명주소, 지번주소
         final rows = <Widget>[
-          _InfoRow(label: '단지명', value: apiName ?? a?.kaptName ?? label),
+          _InfoRow(label: '단지명', value: a?.kakaoName ?? apiName ?? a?.kaptName ?? label),
           if (snap.connectionState == ConnectionState.waiting)
             const _LoadingRow()
           else if (buildYear > 0)

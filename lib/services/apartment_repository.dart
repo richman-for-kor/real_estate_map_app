@@ -24,7 +24,21 @@ const _kAptDtlInfoUrl =
 const _kKakaoSearchUrl = 'https://dapi.kakao.com/v2/local/search/keyword.json';
 
 // 스키마 버전: 필드 추가 시 올려서 구 캐시를 자동 무효화
-const _kSchemaVersion = 5;
+const _kSchemaVersion = 7; // v7: kakaoName 필드 추가
+
+/// 공공 API가 "XX아파트 관리사무소"로 오등록한 단지명에서 Kakao 검색용 순수명 추출.
+String _cleanKaptName(String name) {
+  var n = name;
+  for (final suffix in const [
+    ' 아파트 관리사무소', '아파트관리사무소', ' 관리사무소', '관리사무소', ' 아파트', '아파트',
+  ]) {
+    if (n.endsWith(suffix)) {
+      n = n.substring(0, n.length - suffix.length);
+      break;
+    }
+  }
+  return n.trim();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 데이터 모델
@@ -52,6 +66,7 @@ class ApartmentInfo {
     this.heatingType = '',
     this.managementOffice = '',
     this.detailLoaded = true,
+    this.kakaoName,
   });
 
   final String kaptCode;          // 단지코드 (Firestore doc ID / PK)
@@ -75,6 +90,8 @@ class ApartmentInfo {
   /// false = 좌표만 있고 V4 세부정보(세대수·층수 등)는 아직 미로드.
   /// 기존 Firestore 데이터는 필드 없음 → default true (하위 호환).
   final bool detailLoaded;
+  /// 카카오 로컬 API(keyword.json) 검색으로 확인된 장소명 (UI 이름 통일 기준).
+  final String? kakaoName;
 
   /// 지도에 렌더링 가능한 유효 좌표 여부.
   bool get hasValidCoords => lat != 0.0 && lng != 0.0;
@@ -109,6 +126,7 @@ class ApartmentInfo {
       managementOffice: d['managementOffice'] as String? ?? '',
       // 필드 없으면 기존 데이터로 간주 → 세부정보 완료(true)
       detailLoaded: d['detailLoaded'] as bool? ?? true,
+      kakaoName: d['kakaoName'] as String?,
     );
   }
 
@@ -133,6 +151,7 @@ class ApartmentInfo {
     'heatingType': heatingType,
     'managementOffice': managementOffice,
     'detailLoaded': detailLoaded,
+    if (kakaoName != null) 'kakaoName': kakaoName,
     'schemaVersion': _kSchemaVersion,
     'cachedAt': FieldValue.serverTimestamp(),
   };
@@ -154,6 +173,7 @@ class ApartmentInfo {
     String? heatingType,
     String? managementOffice,
     bool? detailLoaded,
+    String? kakaoName,
   }) =>
       ApartmentInfo(
         kaptCode: kaptCode,
@@ -176,6 +196,7 @@ class ApartmentInfo {
         heatingType: heatingType ?? this.heatingType,
         managementOffice: managementOffice ?? this.managementOffice,
         detailLoaded: detailLoaded ?? this.detailLoaded,
+        kakaoName: kakaoName ?? this.kakaoName,
       );
 
   /// "20040630" → "2004년 06월 30일"
@@ -532,9 +553,17 @@ class ApartmentRepository {
       final kakaoKey = dotenv.env['KAKAO_REST_API_KEY'];
       if (kakaoKey == null || kakaoKey.isEmpty) return apt;
 
-      // 3단계 fallback: (1) 단지명+주소 → (2) 단지명만 → (3) 주소만
+      // 공공 API가 "아파트 관리사무소"로 오등록한 경우 suffix 제거 후 순수 단지명 추출
+      final cleanName = _cleanKaptName(apt.kaptName);
+
+      // 4단계 fallback:
+      //   (1) 정제된 단지명 + 주소 (주요 경로)
+      //   (2) 정제된 단지명만          (주소 매핑 실패 시)
+      //   (3) 원본 단지명만            (정제가 오히려 손실인 경우)
+      //   (4) 주소만                   (단지명으로 찾기 어려울 때)
       final queries = [
-        '${apt.kaptName} ${apt.kaptAddr}'.trim(),
+        '$cleanName ${apt.kaptAddr}'.trim(),
+        cleanName,
         apt.kaptName.trim(),
         apt.kaptAddr.trim(),
       ];
@@ -559,13 +588,19 @@ class ApartmentRepository {
         final lng = double.tryParse(first['x'] as String? ?? '') ?? 0.0;
         if (lat == 0.0 || lng == 0.0) continue;
 
-        if (q != '${apt.kaptName} ${apt.kaptAddr}'.trim()) {
+        final kakaoPlaceName = first['place_name'] as String?;
+
+        if (q != '$cleanName ${apt.kaptAddr}'.trim()) {
           debugPrint('[AptRepo] 카카오 fallback 성공 (${apt.kaptName}): "$q"');
         }
-        return apt.copyWith(lat: lat, lng: lng);
+        return apt.copyWith(
+          lat: lat,
+          lng: lng,
+          kakaoName: kakaoPlaceName?.isNotEmpty == true ? kakaoPlaceName : null,
+        );
       }
 
-      debugPrint('[AptRepo] 카카오 좌표 없음 — 3단계 검색 모두 실패 (${apt.kaptName})');
+      debugPrint('[AptRepo] 카카오 좌표 없음 — 4단계 검색 모두 실패 (${apt.kaptName})');
       return apt;
     } catch (e) {
       debugPrint('[AptRepo] 카카오 좌표 보강 실패 (${apt.kaptName}): $e');
