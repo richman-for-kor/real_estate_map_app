@@ -23,8 +23,8 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../services/house_log_service.dart';
 import '../services/imjang_service.dart';
-import '../services/public_data_service.dart';
 import '../services/apartment_repository.dart';
+import '../services/trade_repository.dart';
 import '../services/favorite_service.dart';
 import '../services/recent_view_service.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -43,73 +43,6 @@ const _kCardBg = Colors.white;
 // ─────────────────────────────────────────────────────────────────────────────
 // MapScreen
 // ─────────────────────────────────────────────────────────────────────────────
-
-// ─── 아파트 단지명 정규화 (파일 레벨 — MapScreen + PropertyInfoSheet 공용) ────
-/// 법정동 접두사·괄호·공백·차/단지 suffix 제거, LG↔엘지 통합.
-/// 공공 API가 관리사무소명으로 등록한 단지 처리 ("아파트 관리사무소" 등 suffix 제거).
-String _normalizeAptName(String name) {
-  var n = name;
-  // 공공 API 데이터 품질 문제: "XX아파트 관리사무소" 형태로 등록된 경우 suffix 제거
-  for (final suffix in const [
-    ' 아파트 관리사무소', '아파트관리사무소', ' 관리사무소', '관리사무소',
-  ]) {
-    if (n.endsWith(suffix)) {
-      n = n.substring(0, n.length - suffix.length);
-      break;
-    }
-  }
-  for (final prefix in const [
-    '정자', '구미', '분당', '수내', '서현', '이매', '판교',
-    '야탑', '금곡', '중앙', '보평', '장안', '율동', '동판교',
-  ]) {
-    if (n.startsWith(prefix)) {
-      n = n.substring(prefix.length);
-      break;
-    }
-  }
-  n = n.replaceAll(RegExp(r'[\s()]'), '');
-  n = n.replaceAll(RegExp(r'(\d+)(차|단지)'), r'\1');
-  n = n.replaceAll('LG', '엘지').replaceAll('lg', '엘지');
-  return n;
-}
-
-
-/// 정규화된 두 이름이 minLen자 이상의 공통 부분 문자열을 공유하는지 확인.
-bool _sharesCoreSubstring(String a, String b, {int minLen = 3}) {
-  if (a.length < minLen || b.length < minLen) return false;
-  for (int start = 0; start <= a.length - minLen; start++) {
-    for (int len = a.length - start; len >= minLen; len--) {
-      if (b.contains(a.substring(start, start + len))) return true;
-    }
-  }
-  return false;
-}
-
-/// trade records 중 kaptName과 가장 잘 매칭되는 complexName 반환.
-String? _resolveApiName(List<AptTradeRecord> records, String kaptName) {
-  if (records.isEmpty) return null;
-  // 1. 정확 일치
-  for (final r in records) {
-    if (r.complexName.trim() == kaptName) return r.complexName.trim();
-  }
-  // 2. contains 일치
-  for (final r in records) {
-    final name = r.complexName.trim();
-    if (name.contains(kaptName) || kaptName.contains(name)) return name;
-  }
-  // 3. 정규화 후 공통 핵심어
-  final normKapt = _normalizeAptName(kaptName);
-  for (final r in records) {
-    final normName = _normalizeAptName(r.complexName.trim());
-    if (normName == normKapt ||
-        normName.contains(normKapt) ||
-        normKapt.contains(normName) ||
-        _sharesCoreSubstring(normKapt, normName)) {
-      return r.complexName.trim();
-    }
-  }
-  return null;
-}
 
 typedef _MapJumpTarget = ({double lat, double lng});
 
@@ -150,10 +83,6 @@ class _MapScreenState extends State<MapScreen> {
   final Map<String, String> _kaptCodeToBjdCode = {};
   /// 그리드 키("lat_idx_lng_idx") → bjdCode 캐시 (역지오코딩 중복 API 호출 방지).
   final Map<String, String?> _gridBjdCache = {};
-  /// lawdCd → 최근 3개월 실거래가 Future 캐시 (빠른 마커 아이콘용).
-  final Map<String, Future<Map<String, _MarkerPrice>>> _fastPriceMapCache = {};
-  /// lawdCd → 이전 4~12개월 실거래가 Future 캐시 (미매칭 단지 보완용).
-  final Map<String, Future<Map<String, _MarkerPrice>>> _supplementalPriceMapCache = {};
   /// 앱 첫 로드 여부 — true일 때만 로딩 배지를 표시.
   bool _isInitialLoad = true;
 
@@ -578,15 +507,12 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  // ── Phase-1: 아파트 목록만 즉시 렌더링 → Phase-2: 백그라운드 가격 업데이트 ──
-  //
-  // 한 번 등록된 bjdCode는 무조건 끝까지 렌더.
-  // 화면 밖 마커는 다음 _removeOutOfBoundsMarkers 호출 시 정확히 제거됨.
+  // ── Phase 1: 아파트 목록 로드 → 기본 마커 즉시 표시 ────────────────────────
+  // Phase 2: recentPrice로 말풍선 아이콘 즉시 교체 (추가 API 호출 없음)
   Future<void> _fetchAndRenderBjdCode(String bjdCode) async {
     if (!mounted || _mapController == null) return;
-    final lawdCd = bjdCode.length >= 5 ? bjdCode.substring(0, 5) : bjdCode;
 
-    // ── Phase 1: 단지 목록 로드 ──────────────────────────────────────────
+    // ── Phase 1: Firestore 마커 목록 로드 ──────────────────────────────────
     List<ApartmentInfo> apts;
     try {
       apts = await ApartmentRepository.instance.getApartmentsByBjdCode(bjdCode);
@@ -612,26 +538,20 @@ class _MapScreenState extends State<MapScreen> {
           cb.northEast.longitude + buf,
         ),
       );
-    } catch (_) {
-      // bounds 취득 실패 시 필터 없이 전체 추가
-    }
+    } catch (_) {}
 
-    await _addBasicMarkers(apts, bjdCode, lawdCd, renderBounds);
+    await _addBasicMarkers(apts, bjdCode, renderBounds);
     if (!mounted) return;
 
-    // ── Phase 2: 실거래가 백그라운드 로드 → 마커 아이콘 교체 ─────────────
-    // fire-and-forget: await 하지 않아 병렬 렌더링 흐름을 블로킹하지 않음
-    _loadAndApplyPrices(apts, lawdCd);
+    // ── Phase 2: recentPrice로 말풍선 즉시 적용 (API 호출 없음) ──────────
+    // fire-and-forget
+    _applyPriceBubbles(apts);
   }
 
-  // ── Phase 1: 기본 마커 일괄 추가 (가격 아이콘 없이 빠르게) ────────────────
-  // NOverlayImage.fromWidget을 사용하지 않아 즉각 렌더링 가능.
-  // renderBounds(nullable): 비null이면 화면 밖 좌표 필터링, null이면 전체 추가.
-  // 무조건 끝까지 렌더 → 화면 밖 마커는 _removeOutOfBoundsMarkers가 정리.
+  // ── Phase 1: 기본 마커 일괄 추가 (캡션만, 빠른 렌더링) ───────────────────
   Future<void> _addBasicMarkers(
     List<ApartmentInfo> apts,
     String bjdCode,
-    String lawdCd,
     NLatLngBounds? renderBounds,
   ) async {
     if (!mounted || _mapController == null) return;
@@ -642,13 +562,11 @@ class _MapScreenState extends State<MapScreen> {
 
       final pos = NLatLng(apt.lat, apt.lng);
 
-      // 화면(+버퍼) 밖이면 마커 추가 생략 → 과도한 렌더링 방지
       if (renderBounds != null && !_boundsContains(renderBounds, pos)) continue;
 
       final marker = NMarker(id: apt.kaptCode, position: pos);
-
       final displayName = apt.kakaoName ?? apt.kaptName;
-      // 기본 마커: 캡션(단지명)만, 커스텀 아이콘 없음 → 즉시 표시 가능
+
       marker.setCaption(
         NOverlayCaption(
           text: displayName,
@@ -658,7 +576,7 @@ class _MapScreenState extends State<MapScreen> {
         ),
       );
       marker.setOnTapListener((_) {
-        _showPropertyInfoSheet(pos, displayName, lawdCd: lawdCd, apt: apt);
+        _showPropertyInfoSheet(pos, displayName, apt: apt);
         return true;
       });
 
@@ -676,63 +594,13 @@ class _MapScreenState extends State<MapScreen> {
       _aptMarkerMap[m.info.id] = m;
       _kaptCodeToBjdCode[m.info.id] = bjdCode;
     }
-    debugPrint('[MapScreen] bjdCode=$bjdCode 기본 마커 ${newMarkers.length}개 즉시 표시');
+    debugPrint('[MapScreen] bjdCode=$bjdCode 기본 마커 ${newMarkers.length}개 표시');
   }
 
-  // ── Phase 2: 가격 로드 → 아이콘 교체 (A→B→C 순서로 진행) ────────────────
-  // Phase 2A: 최근 3개월 fast path
-  // Phase 2B: 3~12개월 supplemental (2A에서 미매칭 단지만)
-  // Phase 2C: 12개월 전체 미매칭 → 빈 말풍선("시세없음")으로 교체
-  Future<void> _loadAndApplyPrices(
-    List<ApartmentInfo> apts,
-    String lawdCd,
-  ) async {
-    // Phase 2A: 최근 3개월 (빠름, ~3 API 호출)
-    final fastMap = await _getFastPriceMap(lawdCd);
-    if (!mounted) return;
-
-    if (fastMap.isNotEmpty) {
-      await _applyPriceIcons(apts, fastMap, lawdCd);
-      if (!mounted) return;
-    }
-
-    // Phase 2B: 이전 9개월 — 아직 가격 없는 단지만 보완
-    final afterFast = apts
-        .where((a) =>
-            _aptMarkerMap.containsKey(a.kaptCode) &&
-            _findPriceMatch(fastMap, a.kaptName.trim()) == null)
-        .toList();
-
-    Map<String, _MarkerPrice> suppMap = {};
-    if (afterFast.isNotEmpty) {
-      suppMap = await _getSupplementalPriceMap(lawdCd);
-      if (!mounted) return;
-      if (suppMap.isNotEmpty) {
-        await _applyPriceIcons(afterFast, suppMap, lawdCd);
-        if (!mounted) return;
-        debugPrint('[MapScreen] $lawdCd 보완 가격 ${afterFast.length}개 대상 업데이트');
-      }
-    }
-
-    // Phase 2C: 12개월 전체 조회 후에도 가격 없는 단지 → 빈 말풍선으로 교체
-    final noPrice = apts
-        .where((a) =>
-            _aptMarkerMap.containsKey(a.kaptCode) &&
-            _findPriceMatch(fastMap, a.kaptName.trim()) == null &&
-            _findPriceMatch(suppMap, a.kaptName.trim()) == null)
-        .toList();
-    if (noPrice.isNotEmpty) {
-      await _applyEmptyBubbles(noPrice, lawdCd);
-    }
-  }
-
-  /// 가격 정보 없는 단지에 빈 말풍선("시세없음") 아이콘 적용.
-  Future<void> _applyEmptyBubbles(
-    List<ApartmentInfo> apts,
-    String lawdCd,
-  ) async {
+  // ── Phase 2: recentPrice로 말풍선 아이콘 교체 ────────────────────────────
+  // Firestore에 미리 적재된 recentPrice를 바로 사용 — API 호출 없음.
+  Future<void> _applyPriceBubbles(List<ApartmentInfo> apts) async {
     const chunkSize = 10;
-    int count = 0;
     for (var i = 0; i < apts.length; i += chunkSize) {
       if (!mounted) return;
       final chunk = apts.sublist(i, (i + chunkSize).clamp(0, apts.length));
@@ -741,141 +609,18 @@ class _MapScreenState extends State<MapScreen> {
         final marker = _aptMarkerMap[apt.kaptCode];
         if (marker == null) return;
 
-        // priceLabel·pyeongLabel 비워두면 _AptPriceBubble이 "시세없음" 표시
-        final icon = await _buildMarkerIcon(apt);
-        if (!mounted || icon == null) return;
-
-        marker.setIcon(icon);
-        marker.setAnchor(const NPoint(0.5, 1.0));
-
-        final pos = marker.position;
-        final lcd = apt.bjdCode.length >= 5
-            ? apt.bjdCode.substring(0, 5)
-            : apt.bjdCode;
-        final displayName = apt.kakaoName ?? apt.kaptName;
-        marker.setOnTapListener((_) {
-          _showPropertyInfoSheet(pos, displayName, lawdCd: lcd, apt: apt);
-          return true;
-        });
-        count++;
-      }));
-    }
-    debugPrint('[MapScreen] $lawdCd 빈 말풍선 $count개 적용');
-  }
-
-  /// [priceMap] 기준으로 [apts] 매칭 마커 아이콘을 말풍선으로 교체. 10개씩 병렬.
-  Future<void> _applyPriceIcons(
-    List<ApartmentInfo> apts,
-    Map<String, _MarkerPrice> priceMap,
-    String lawdCd,
-  ) async {
-    final matched = <({ApartmentInfo apt, _MarkerPrice mp, String? apiName})>[];
-    for (final apt in apts) {
-      final mp = _findPriceMatch(priceMap, apt.kaptName.trim());
-      if (mp != null) {
-        matched.add((
-          apt: apt,
-          mp: mp,
-          apiName: _findMatchedKey(priceMap, apt.kaptName.trim()),
-        ));
-      }
-    }
-    if (matched.isEmpty) return;
-
-    const chunkSize = 10;
-    for (var i = 0; i < matched.length; i += chunkSize) {
-      if (!mounted) return;
-      final chunk = matched.sublist(i, (i + chunkSize).clamp(0, matched.length));
-      await Future.wait(chunk.map((item) async {
-        if (!mounted) return;
-        final marker = _aptMarkerMap[item.apt.kaptCode];
-        if (marker == null) return;
-
         final icon = await _buildMarkerIcon(
-          item.apt,
-          priceLabel: item.mp.priceLabel,
-          pyeongLabel: item.mp.pyeongLabel,
+          apt,
+          priceLabel: apt.recentPrice,
+          pyeongLabel: '',
         );
         if (!mounted || icon == null) return;
 
         marker.setIcon(icon);
         marker.setAnchor(const NPoint(0.5, 1.0));
-
-        final pos = marker.position;
-        final lcd = item.apt.bjdCode.length >= 5
-            ? item.apt.bjdCode.substring(0, 5)
-            : item.apt.bjdCode;
-        final displayName = item.apt.kakaoName ?? item.apt.kaptName;
-        marker.setOnTapListener((_) {
-          _showPropertyInfoSheet(
-            pos,
-            displayName,
-            lawdCd: lcd,
-            apt: item.apt,
-            apiName: item.apiName,
-          );
-          return true;
-        });
       }));
     }
-    debugPrint('[MapScreen] $lawdCd 가격 아이콘 ${matched.length}개 교체');
   }
-
-  // ── 단지명 기반 가격 매칭 헬퍼 ────────────────────────────────────────────
-  _MarkerPrice? _findPriceMatch(
-    Map<String, _MarkerPrice> priceMap,
-    String aptName,
-  ) {
-    if (priceMap.containsKey(aptName)) return priceMap[aptName];
-    for (final e in priceMap.entries) {
-      if (e.key.contains(aptName) || aptName.contains(e.key)) return e.value;
-    }
-    final norm = _normalizeAptName(aptName);
-    for (final e in priceMap.entries) {
-      final normKey = _normalizeAptName(e.key);
-      if (normKey == norm ||
-          normKey.contains(norm) ||
-          norm.contains(normKey) ||
-          _sharesCoreSubstring(norm, normKey)) {
-        return e.value;
-      }
-    }
-    return null;
-  }
-
-  String? _findMatchedKey(
-    Map<String, _MarkerPrice> priceMap,
-    String aptName,
-  ) {
-    if (priceMap.containsKey(aptName)) return aptName;
-    for (final key in priceMap.keys) {
-      if (key.contains(aptName) || aptName.contains(key)) return key;
-    }
-    final norm = _normalizeAptName(aptName);
-    for (final key in priceMap.keys) {
-      final normKey = _normalizeAptName(key);
-      if (normKey == norm ||
-          normKey.contains(norm) ||
-          norm.contains(normKey) ||
-          _sharesCoreSubstring(norm, normKey)) {
-        return key;
-      }
-    }
-    return null;
-  }
-
-  // ── 실거래가 캐시 (Future를 저장해 동시 요청도 API 1회만 호출) ──────────────
-  Future<Map<String, _MarkerPrice>> _getFastPriceMap(String lawdCd) =>
-      _fastPriceMapCache.putIfAbsent(
-        lawdCd,
-        () => _fetchDistrictMonths(lawdCd, startOffset: 0, count: 3, numOfRows: 1000),
-      );
-
-  Future<Map<String, _MarkerPrice>> _getSupplementalPriceMap(String lawdCd) =>
-      _supplementalPriceMapCache.putIfAbsent(
-        lawdCd,
-        () => _fetchDistrictMonths(lawdCd, startOffset: 3, count: 9, numOfRows: 200),
-      );
 
   void _onMapTapped(NPoint point, NLatLng latLng) {
     // 맵 빈 곳 터치 시 드롭다운/키보드 닫기만 처리.
@@ -1011,91 +756,10 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── Property Info Sheet ──────────────────────────────────────────────────
 
-  /// [startOffset]달 전부터 [count]개월치 실거래 데이터를 가져와 단지명→가격/평수 맵 반환.
-  /// - startOffset=0, count=3 → 이번달~2개월 전 (빠른 Path)
-  /// - startOffset=3, count=9 → 3~11개월 전 (보완 Path)
-  Future<Map<String, _MarkerPrice>> _fetchDistrictMonths(
-    String lawdCd, {
-    required int startOffset,
-    required int count,
-    required int numOfRows,
-  }) async {
-    try {
-      final svc = const PublicDataService();
-      final now = DateTime.now();
-
-      final ymds = List.generate(count, (i) {
-        final d = DateTime(now.year, now.month - startOffset - i);
-        return '${d.year}${d.month.toString().padLeft(2, '0')}';
-      });
-
-      final results = await Future.wait(
-        ymds.map((ymd) => svc.fetchAptTrades(
-          lawdCd: lawdCd,
-          dealYmd: ymd,
-          numOfRows: numOfRows,
-        )),
-      );
-
-      // 단지별 최근 실거래 1건 — 날짜(년·월·일) 내림차순 정렬 후 첫 번째 레코드
-      final latestByComplex = <String, AptTradeRecord>{};
-      for (final data in results) {
-        for (final r in data.records) {
-          if (r.price <= 0) continue;
-          final name = r.complexName.trim();
-          final existing = latestByComplex[name];
-          if (existing == null ||
-              r.dealYear > existing.dealYear ||
-              (r.dealYear == existing.dealYear && r.dealMonth > existing.dealMonth) ||
-              (r.dealYear == existing.dealYear &&
-                  r.dealMonth == existing.dealMonth &&
-                  r.dealDay > existing.dealDay)) {
-            latestByComplex[name] = r;
-          }
-        }
-      }
-
-      final map = <String, _MarkerPrice>{};
-      for (final entry in latestByComplex.entries) {
-        final r = entry.value;
-        map[entry.key] = _MarkerPrice(
-          priceLabel: _fmtPrice(r.price),
-          pyeongLabel: '${(r.area / 3.30579).round()}평',
-        );
-      }
-      debugPrint(
-        '[MapScreen] priceMap($lawdCd, offset=$startOffset, n=$count) → ${map.length}개 단지',
-      );
-      return map;
-    } catch (e) {
-      debugPrint('[MapScreen] priceMap 로드 실패: $e');
-      return {};
-    }
-  }
-
-  /// 만원 단위 → "N.M억" 표시 문자열.
-  String _fmtPrice(int priceManWon) {
-    final eok = priceManWon ~/ 10000;
-    final man = priceManWon % 10000;
-    if (eok > 0) {
-      final decimal = man ~/ 1000;
-      return decimal > 0 ? '$eok.$decimal억' : '$eok억';
-    }
-    return '${(priceManWon ~/ 100) * 100}만';
-  }
-
-  /// 실거래가 API 조회 연월 (YYYYMM). 이번 달 데이터가 없을 경우 호출부에서 폴백.
-  String _currentDealYmd() {
-    final now = DateTime.now();
-    return '${now.year}${now.month.toString().padLeft(2, '0')}';
-  }
-
   void _showPropertyInfoSheet(
     NLatLng pos,
     String label, {
-    String lawdCd = '41135',
     ApartmentInfo? apt,
-    String? apiName,
   }) {
     // 최근 본 매물 자동 저장 (로그인 상태일 때만, silently)
     RecentViewService().addView(
@@ -1124,12 +788,9 @@ class _MapScreenState extends State<MapScreen> {
           builder: (_, scrollCtrl) => _PropertyInfoSheet(
             position: pos,
             label: label,
-            lawdCd: lawdCd,
-            dealYmd: _currentDealYmd(),
             scrollController: scrollCtrl,
             sheetController: sheetCtrl,
             apt: apt,
-            apiName: apiName,
           ),
         );
       },
@@ -1494,20 +1155,16 @@ class _PropertyInfoSheet extends StatefulWidget {
   const _PropertyInfoSheet({
     required this.position,
     required this.label,
-    required this.lawdCd,
-    required this.dealYmd,
     required this.scrollController,
     required this.sheetController,
     this.apt,
-    this.apiName,
   });
 
   final NLatLng position;
-  final String label, lawdCd, dealYmd;
+  final String label;
   final ScrollController scrollController;
   final DraggableScrollableController sheetController;
   final ApartmentInfo? apt;
-  final String? apiName; // priceMap 매칭으로 확인된 API 단지명
 
   @override
   State<_PropertyInfoSheet> createState() => _PropertyInfoSheetState();
@@ -1516,8 +1173,7 @@ class _PropertyInfoSheet extends StatefulWidget {
 class _PropertyInfoSheetState extends State<_PropertyInfoSheet>
     with SingleTickerProviderStateMixin {
   late final TabController _tabCtrl;
-  late final Future<List<AptTradeRecord>> _tradeFuture;
-  String? _apiName; // trade records에서 도출한 API 단지명 (aptNm)
+  late final Future<ApartmentDetail?> _detailFuture;
 
   // 임장노트 입력용
   final _reviewCtrl = TextEditingController();
@@ -1535,19 +1191,11 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet>
   void initState() {
     super.initState();
     _tabCtrl = TabController(length: 3, vsync: this);
-    // priceMap에서 이미 매칭된 API 이름이 있으면 즉시 사용
-    _apiName = widget.apiName;
-    _tradeFuture = _loadTradeDataCached().then((records) {
-      // apiName이 없을 때만 records에서 도출 시도
-      if (_apiName == null) {
-        final kaptName = widget.apt?.kaptName.trim() ?? widget.label;
-        final resolved = _resolveApiName(records, kaptName);
-        if (resolved != null && mounted) {
-          setState(() => _apiName = resolved);
-        }
-      }
-      return records;
-    });
+    _detailFuture = ApartmentRepository.instance.getApartmentDetail(
+      widget.apt?.kaptCode ?? '',
+      lat: widget.apt?.lat,
+      lng: widget.apt?.lng,
+    );
   }
 
   @override
@@ -1556,63 +1204,6 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet>
     _tabCtrl.dispose();
     _reviewCtrl.dispose();
     super.dispose();
-  }
-
-  String _todayStr() {
-    final now = DateTime.now();
-    return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-  }
-
-  /// 시세 데이터 로드: Firestore 캐시(오늘 날짜) → 없으면 API 호출 후 저장.
-  Future<List<AptTradeRecord>> _loadTradeDataCached() async {
-    final db = FirebaseFirestore.instance;
-    final cacheRef = db.collection('apt_price_cache').doc(widget.lawdCd);
-    final today = _todayStr();
-
-    // ── 캐시 확인 ────────────────────────────────────────────────────────────
-    try {
-      final snap = await cacheRef.get();
-      if (snap.exists) {
-        final data = snap.data()!;
-        if (data['cachedDate'] == today) {
-          final rawList =
-              List<Map<String, dynamic>>.from(data['records'] ?? []);
-          debugPrint('[Sheet] 캐시 히트 — ${rawList.length}건');
-          return rawList.map((m) => AptTradeRecord.fromMap(m)).toList();
-        }
-      }
-    } catch (e) {
-      debugPrint('[Sheet] 캐시 읽기 실패: $e');
-    }
-
-    // ── API 호출 ─────────────────────────────────────────────────────────────
-    final svc = const PublicDataService();
-    AptTradeData data = await svc.fetchAptTrades(
-      lawdCd: widget.lawdCd,
-      dealYmd: widget.dealYmd,
-    );
-
-    if (data.records.isEmpty) {
-      final now = DateTime.now();
-      final prev = DateTime(now.year, now.month - 1);
-      data = await svc.fetchAptTrades(
-        lawdCd: widget.lawdCd,
-        dealYmd: '${prev.year}${prev.month.toString().padLeft(2, '0')}',
-      );
-    }
-
-    // ── 캐시 저장 (실패해도 무시) ──────────────────────────────────────────────
-    try {
-      await cacheRef.set({
-        'cachedDate': today,
-        'records': data.records.map((r) => r.toMap()).toList(),
-        'fetchedAt': FieldValue.serverTimestamp(),
-      });
-    } catch (e) {
-      debugPrint('[Sheet] 캐시 저장 실패: $e');
-    }
-
-    return data.records;
   }
 
   Future<void> _toggleFavorite(bool isFav) async {
@@ -1847,12 +1438,10 @@ class _PropertyInfoSheetState extends State<_PropertyInfoSheet>
                 _ComplexInfoTab(
                   apt: widget.apt,
                   label: widget.label,
-                  tradeFuture: _tradeFuture,
-                  apiName: _apiName,
+                  detailFuture: _detailFuture,
                 ),
                 _PriceTab(
-                  lawdCd: widget.lawdCd,
-                  aptName: _apiName ?? widget.apt?.kaptName.trim() ?? widget.label,
+                  aptCode: widget.apt?.kaptCode ?? '',
                 ),
                 _ImjangNotesTab(
                   label: widget.label,
@@ -1961,81 +1550,66 @@ class _ComplexInfoTab extends StatelessWidget {
   const _ComplexInfoTab({
     required this.apt,
     required this.label,
-    required this.tradeFuture,
-    this.apiName,
+    required this.detailFuture,
   });
 
   final ApartmentInfo? apt;
   final String label;
-  final Future<List<AptTradeRecord>> tradeFuture;
-  final String? apiName;
-
-  static String _parkingLabel(int total, int households) {
-    if (households > 0) {
-      final perUnit = total / households;
-      return '$total대 (세대당 ${perUnit.toStringAsFixed(2)}대)';
-    }
-    return '$total대';
-  }
+  final Future<ApartmentDetail?> detailFuture;
 
   @override
   Widget build(BuildContext context) {
-    final a = apt; // null-safe 로컬 참조
-    return FutureBuilder<List<AptTradeRecord>>(
-      future: tradeFuture,
+    final a = apt;
+    return FutureBuilder<ApartmentDetail?>(
+      future: detailFuture,
       builder: (ctx, snap) {
-        // 건축년도 추출 (실거래 데이터 기반)
-        int buildYear = 0;
-        if (snap.hasData) {
-          final years = snap.data!
-              .map((r) => r.buildYear)
-              .where((y) => y > 0)
-              .toList();
-          if (years.isNotEmpty) {
-            final freq = <int, int>{};
-            for (final y in years) {
-              freq[y] = (freq[y] ?? 0) + 1;
-            }
-            buildYear = freq.entries
-                .reduce((best, e) => e.value >= best.value ? e : best)
-                .key;
-          }
-        }
+        final detail = snap.data;
+        final displayName =
+            detail?.kakaoName ?? a?.kakaoName ?? detail?.complexName ?? label;
 
-        // 순서: 단지명, 건축년도, 세대수, 주차대수, 난방, 사용승인일, 저/최고층, 건설사, 도로명주소, 지번주소
         final rows = <Widget>[
-          _InfoRow(label: '단지명', value: a?.kakaoName ?? apiName ?? a?.kaptName ?? label),
+          _InfoRow(label: '단지명', value: displayName),
           if (snap.connectionState == ConnectionState.waiting)
             const _LoadingRow()
-          else if (buildYear > 0)
-            _InfoRow(label: '건축년도', value: '$buildYear년'),
-          if (a != null && a.totalHouseholds > 0)
+          else if (detail != null && detail.buildYear > 0)
+            _InfoRow(label: '건축년도', value: '${detail.buildYear}년'),
+          if (detail != null && detail.totalHouseholds > 0)
             _InfoRow(
               label: '세대수',
-              value: '${a.totalHouseholds}세대'
-                  '${a.dongCount > 0 ? ' (${a.dongCount}개동)' : ''}',
+              value: '${detail.totalHouseholds}세대'
+                  '${detail.dongCount > 0 ? ' (${detail.dongCount}개동)' : ''}',
             ),
-          if (a != null && a.totalParkingCount > 0)
+          if (detail != null && detail.parkingPerHousehold > 0)
             _InfoRow(
-              label: '주차대수',
-              value: _parkingLabel(a.totalParkingCount, a.totalHouseholds),
+              label: '세대당 주차',
+              value: '${detail.parkingPerHousehold.toStringAsFixed(2)}대',
             ),
-          if (a != null && a.heatingType.isNotEmpty)
-            _InfoRow(label: '난방', value: a.heatingType),
-          if (a != null && a.approvalDate.isNotEmpty)
-            _InfoRow(label: '사용승인일', value: a.approvalDate),
-          if (a != null && (a.minFloor > 0 || a.maxFloor > 0))
+          if (detail != null && detail.heatingMethod.isNotEmpty)
+            _InfoRow(label: '난방', value: detail.heatingMethod),
+          if (detail != null && detail.highestFloor > 0)
             _InfoRow(
-              label: '저/최고층',
-              value: '${a.minFloor < 1 ? 1 : a.minFloor}층 / ${a.maxFloor < 1 ? 1 : a.maxFloor}층',
+              label: detail.lowestFloor > 0 ? '저/최고층' : '최고층',
+              value: detail.lowestFloor > 0
+                  ? '${detail.lowestFloor}층 / ${detail.highestFloor}층'
+                  : '${detail.highestFloor}층',
             ),
-          if (a != null && a.builder.isNotEmpty)
-            _InfoRow(label: '건설사', value: a.builder),
-          if (a != null && a.roadAddr.isNotEmpty)
-            _InfoRow(label: '도로명주소', value: a.roadAddr),
+          if (detail != null && detail.builder.isNotEmpty)
+            _InfoRow(label: '건설사', value: detail.builder),
+          if (detail != null && detail.subwayStation.isNotEmpty)
+            _InfoRow(label: '지하철', value: detail.subwayStation),
+          if (detail != null && detail.busStopDistance.isNotEmpty)
+            _InfoRow(label: '버스 정류장', value: detail.busStopDistance),
+          if (detail != null && detail.facilities.isNotEmpty)
+            _InfoRow(label: '편의시설', value: detail.facilities),
+          if (detail != null && detail.roadAddress.isNotEmpty)
+            _InfoRow(label: '도로명주소', value: detail.roadAddress),
           _InfoRow(
             label: '지번주소',
-            value: a?.kaptAddr.isNotEmpty == true ? a!.kaptAddr : '-',
+            value: detail?.address.isNotEmpty == true
+                ? detail!.address
+                : a?.kaptAddr.isNotEmpty == true
+                    ? a!.kaptAddr
+                    : '-',
           ),
         ];
 
@@ -2055,9 +1629,10 @@ class _ComplexInfoTab extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _PriceTab extends StatefulWidget {
-  const _PriceTab({required this.lawdCd, required this.aptName});
-  final String lawdCd;
-  final String aptName;
+  const _PriceTab({required this.aptCode});
+
+  /// apartment_trades 문서 ID (= ApartmentInfo.kaptCode)
+  final String aptCode;
 
   @override
   State<_PriceTab> createState() => _PriceTabState();
@@ -2067,162 +1642,43 @@ class _PriceTabState extends State<_PriceTab> {
   int _years = 1;
   int? _selectedPyeong;
 
-  // yyyymm → 전체 지역 실거래 레코드 (원본)
-  final Map<String, List<AptTradeRecord>> _rawCache = {};
-  // yyyymm → 필터링된 단지 레코드
-  final Map<String, List<AptTradeRecord>> _cache = {};
-
+  List<TradeRecord> _allTrades = [];
   bool _isLoading = false;
 
   @override
   void initState() {
     super.initState();
-    _loadYears(1);
+    _loadTrades();
   }
 
-  @override
-  void didUpdateWidget(_PriceTab old) {
-    super.didUpdateWidget(old);
-    // aptName이 나중에 resolve되면 기존 원본 캐시를 재필터링
-    if (old.aptName != widget.aptName && widget.aptName.isNotEmpty) {
-      setState(() {
-        for (final key in _rawCache.keys) {
-          _cache[key] = _filter(_rawCache[key]!);
-        }
-      });
-    }
-  }
-
-  Future<void> _loadYears(int targetYears) async {
-    if (_isLoading) return;
-    setState(() {
-      _isLoading = true;
-    });
-
-    final now = DateTime.now();
-    final allMonths = <String>[];
-    for (int i = 0; i < targetYears * 12; i++) {
-      final d = DateTime(now.year, now.month - i);
-      allMonths.add('${d.year}${d.month.toString().padLeft(2, '0')}');
-    }
-    final toLoad = allMonths.where((m) => !_cache.containsKey(m)).toList();
-
-    for (int i = 0; i < toLoad.length; i += 6) {
-      final batch = toLoad.sublist(i, min(i + 6, toLoad.length));
-      await Future.wait(batch.map(_fetchMonth));
-      if (mounted) setState(() {}); // 배치마다 점진적 업데이트
-    }
-
-    if (mounted) {
-      setState(() {
-        _isLoading = false;
-        _years = targetYears;
-      });
-    }
-  }
-
-  Future<void> _fetchMonth(String yyyymm) async {
-    final db = FirebaseFirestore.instance;
-    final cacheKey = '${widget.lawdCd}_$yyyymm';
-    final cacheRef = db.collection('apt_price_cache_v2').doc(cacheKey);
-    List<AptTradeRecord>? allRecords;
-
-    // 최근 2개월(이번달·지난달)은 당일 캐시가 아니면 재조회,
-    // 그 이전 달은 Firestore 캐시 있으면 API 호출 없이 그대로 사용.
-    final now = DateTime.now();
-    final prevMonth = DateTime(now.year, now.month - 1);
-    final recentKeys = {
-      '${now.year}${now.month.toString().padLeft(2, '0')}',
-      '${prevMonth.year}${prevMonth.month.toString().padLeft(2, '0')}',
-    };
-    final isRecent = recentKeys.contains(yyyymm);
-
-    // 1) Firestore 캐시 확인
+  Future<void> _loadTrades() async {
+    if (_isLoading || widget.aptCode.isEmpty) return;
+    setState(() => _isLoading = true);
     try {
-      final snap = await cacheRef.get();
-      if (snap.exists) {
-        final data = snap.data()!;
-        bool useCache;
-
-        if (isRecent) {
-          // 최근 달: 오늘 캐시된 것만 유효 (당일 중복 API 호출 방지)
-          final fetchedAt = data['fetchedAt'] as Timestamp?;
-          if (fetchedAt != null) {
-            final fd = fetchedAt.toDate().toLocal();
-            useCache = fd.year == now.year &&
-                fd.month == now.month &&
-                fd.day == now.day;
-          } else {
-            useCache = false; // 날짜 없는 구버전 캐시 → 재조회
-          }
-        } else {
-          // 과거 달: 캐시가 있으면 무조건 사용
-          useCache = true;
-        }
-
-        if (useCache) {
-          final rawList =
-              List<Map<String, dynamic>>.from(data['records'] ?? []);
-          allRecords = rawList.map(AptTradeRecord.fromMap).toList();
-        }
+      final trades =
+          await TradeRepository.instance.getTradesByAptCode(widget.aptCode);
+      if (mounted) {
+        setState(() {
+          _allTrades = trades;
+          _isLoading = false;
+        });
       }
-    } catch (_) {}
-
-    // 2) 캐시 없거나 재조회 필요 시 API 호출
-    if (allRecords == null) {
-      try {
-        final data = await const PublicDataService().fetchAptTrades(
-          lawdCd: widget.lawdCd,
-          dealYmd: yyyymm,
-          numOfRows: 1000,
-        );
-        allRecords = data.records;
-        // 중복 제거 후 Firestore 저장 (set으로 덮어쓰기)
-        try {
-          final seen = <String>{};
-          final deduped = allRecords.where((r) {
-            final key =
-                '${r.complexName}_${r.dealYear}_${r.dealMonth}_${r.dealDay}_${r.floor}_${r.area}';
-            return seen.add(key);
-          }).toList();
-          await cacheRef.set({
-            'records': deduped.map((r) => r.toMap()).toList(),
-            'fetchedAt': FieldValue.serverTimestamp(),
-          });
-        } catch (_) {}
-      } catch (_) {
-        allRecords = [];
-      }
+    } catch (e) {
+      if (mounted) setState(() => _isLoading = false);
     }
-
-    _rawCache[yyyymm] = allRecords;
-    _cache[yyyymm] = _filter(allRecords);
   }
 
-  List<AptTradeRecord> _filter(List<AptTradeRecord> records) {
-    final name = widget.aptName.trim();
-    if (name.isEmpty) return records;
-    final filtered = records.where((r) {
-      final rn = r.complexName.trim();
-      return rn == name || rn.contains(name) || name.contains(rn);
-    }).toList();
-    return filtered.isNotEmpty ? filtered : [];
-  }
-
-  List<AptTradeRecord> get _allFiltered {
-    final all = _cache.values.expand((l) => l).toList();
-    all.sort((a, b) {
-      final da = DateTime(a.dealYear, a.dealMonth, max(a.dealDay, 1));
-      final db2 = DateTime(b.dealYear, b.dealMonth, max(b.dealDay, 1));
-      return db2.compareTo(da);
-    });
-    return all;
+  // 선택된 기간(년)으로 필터링
+  List<TradeRecord> get _yearFiltered {
+    final cutoff =
+        DateTime.now().subtract(Duration(days: _years * 365));
+    return _allTrades.where((r) => r.dateTime.isAfter(cutoff)).toList();
   }
 
   List<int> get _pyeongList {
     final freq = <int, int>{};
-    for (final r in _allFiltered) {
-      final p = (r.area / 3.30579).round();
+    for (final r in _yearFiltered) {
+      final p = r.pyeong;
       if (p > 0) freq[p] = (freq[p] ?? 0) + 1;
     }
     return freq.keys.toList()..sort();
@@ -2230,28 +1686,26 @@ class _PriceTabState extends State<_PriceTab> {
 
   int? get _mostCommonPyeong {
     final freq = <int, int>{};
-    for (final r in _allFiltered) {
-      final p = (r.area / 3.30579).round();
+    for (final r in _yearFiltered) {
+      final p = r.pyeong;
       if (p > 0) freq[p] = (freq[p] ?? 0) + 1;
     }
     if (freq.isEmpty) return null;
     return freq.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
   }
 
-  List<AptTradeRecord> get _pyeongFiltered {
+  List<TradeRecord> get _pyeongFiltered {
     final p = _selectedPyeong;
-    if (p == null) return _allFiltered;
-    return _allFiltered
-        .where((r) => (r.area / 3.30579).round() == p)
-        .toList();
+    if (p == null) return _yearFiltered;
+    return _yearFiltered.where((r) => r.pyeong == p).toList();
   }
 
   List<MapEntry<DateTime, int>> get _chartPoints {
     final monthMap = <String, List<int>>{};
     for (final r in _pyeongFiltered) {
       if (r.price <= 0) continue;
-      final key =
-          '${r.dealYear}${r.dealMonth.toString().padLeft(2, '0')}';
+      final dt = r.dateTime;
+      final key = '${dt.year}${dt.month.toString().padLeft(2, '0')}';
       monthMap.putIfAbsent(key, () => []).add(r.price);
     }
     final pts = monthMap.entries.map((e) {
@@ -2268,22 +1722,24 @@ class _PriceTabState extends State<_PriceTab> {
     return pts;
   }
 
-  /// 개별 거래 건 좌표 목록 (그래프 스캐터 점 용)
   List<MapEntry<DateTime, int>> get _rawChartDots {
     return _pyeongFiltered
         .where((r) => r.price > 0)
-        .map((r) => MapEntry(
-              DateTime(r.dealYear, r.dealMonth, r.dealDay > 0 ? r.dealDay : 1),
-              r.price,
-            ))
+        .map((r) => MapEntry(r.dateTime, r.price))
         .toList()
       ..sort((a, b) => a.key.compareTo(b.key));
+  }
+
+  List<TradeRecord> get _listFiltered {
+    final list = List<TradeRecord>.from(_pyeongFiltered);
+    list.sort((a, b) => b.dateTime.compareTo(a.dateTime));
+    return list;
   }
 
   @override
   Widget build(BuildContext context) {
     final pyeongs = _pyeongList;
-    final filtered = _pyeongFiltered;
+    final filtered = _listFiltered;
     final chartPts = _chartPoints;
     final rawDots = _rawChartDots;
 
@@ -2314,7 +1770,7 @@ class _PriceTabState extends State<_PriceTab> {
                 items: const [1, 3, 5, 10],
                 label: (y) => '$y년',
                 enabled: !_isLoading,
-                onChanged: (v) => _loadYears(v),
+                onChanged: (v) => setState(() => _years = v),
               ),
               const SizedBox(width: 10),
               // 평형 드롭다운 (오른쪽)
@@ -2655,11 +2111,10 @@ class _FilterDropdown<T> extends StatelessWidget {
 
 class _TradeCard extends StatelessWidget {
   const _TradeCard({required this.record});
-  final AptTradeRecord record;
+  final TradeRecord record;
 
   @override
   Widget build(BuildContext context) {
-    final pyeong = (record.area / 3.30579).round();
     return Container(
       margin: const EdgeInsets.only(bottom: 1),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
@@ -2690,7 +2145,7 @@ class _TradeCard extends StatelessWidget {
           // 평형 + 면적
           Expanded(
             child: Text(
-              '$pyeong평  ${record.area.toStringAsFixed(1)}㎡',
+              '${record.pyeong}평  ${record.netArea.toStringAsFixed(1)}㎡',
               style: const TextStyle(fontSize: 12, color: kTextMuted),
             ),
           ),
@@ -3179,16 +2634,6 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 마커 가격 데이터 모델
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _MarkerPrice {
-  const _MarkerPrice({required this.priceLabel, required this.pyeongLabel});
-  final String priceLabel; // "8.5억"
-  final String pyeongLabel; // "24평"
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 말풍선 마커 위젯 (네이비 카드 + 흰 텍스트)

@@ -1,675 +1,309 @@
-import 'dart:convert';
-
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
-import 'dart:math';
 
-// ─── API 키 & 엔드포인트 ────────────────────────────────────────────────────────
-// 공공데이터포털: 국토교통부_공동주택 단지 목록제공 서비스
-// https://www.data.go.kr/data/15044075/openapi.do
-const _kAptListBaseUrl =
-    'https://apis.data.go.kr/1613000/AptListService3/getLegaldongAptList3';
+// ─────────────────────────────────────────────────────────────────────────────
+// 내부 캐시 헬퍼
+// ─────────────────────────────────────────────────────────────────────────────
 
-// 국토교통부_공동주택 기본정보 V4 (세대수, 층수, 난방, 건설사 등)
-const _kAptBassInfoUrl =
-    'https://apis.data.go.kr/1613000/AptBasisInfoServiceV4/getAphusBassInfoV4';
+class _CacheEntry<T> {
+  _CacheEntry(this.value, this.at);
+  final T value;
+  final DateTime at;
+}
 
-// 국토교통부_공동주택 상세정보 V4 (주차대수 등)
-const _kAptDtlInfoUrl =
-    'https://apis.data.go.kr/1613000/AptBasisInfoServiceV4/getAphusDtlInfoV4';
+/// TTL 기반 인메모리 캐시.
+/// T = nullable 타입도 지원 (null 결과도 캐시하여 재조회 방지).
+class _TimedCache<T> {
+  _TimedCache(this.ttl);
 
-// 카카오 로컬 API — 키워드 검색 (단지주소 → 위경도 변환)
-const _kKakaoSearchUrl = 'https://dapi.kakao.com/v2/local/search/keyword.json';
+  final Duration ttl;
+  final Map<String, _CacheEntry<T>> _store = {};
 
-// 스키마 버전: 필드 추가 시 올려서 구 캐시를 자동 무효화
-const _kSchemaVersion = 7; // v7: kakaoName 필드 추가
-
-/// 공공 API가 "XX아파트 관리사무소"로 오등록한 단지명에서 Kakao 검색용 순수명 추출.
-String _cleanKaptName(String name) {
-  var n = name;
-  for (final suffix in const [
-    ' 아파트 관리사무소', '아파트관리사무소', ' 관리사무소', '관리사무소', ' 아파트', '아파트',
-  ]) {
-    if (n.endsWith(suffix)) {
-      n = n.substring(0, n.length - suffix.length);
-      break;
-    }
+  /// 캐시에 유효한 엔트리가 있으면 true.
+  bool has(String key) {
+    final e = _store[key];
+    return e != null && DateTime.now().difference(e.at) < ttl;
   }
-  return n.trim();
+
+  /// 캐시 읽기. 없거나 만료되면 null 반환.
+  T? read(String key) {
+    if (!has(key)) return null;
+    return _store[key]!.value;
+  }
+
+  /// 캐시 쓰기.
+  void write(String key, T value) {
+    _store[key] = _CacheEntry(value, DateTime.now());
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 데이터 모델
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Firestore `apartments/{kaptCode}` 문서 스키마와 1:1 대응하는 단지 정보 모델.
+/// 지도 마커용 단지 정보 모델.
+/// apartments_by_bjd/{bjdCode}.apartments[] 배열의 각 항목과 1:1 대응.
 class ApartmentInfo {
   const ApartmentInfo({
     required this.kaptCode,
     required this.kaptName,
     required this.bjdCode,
-    required this.kaptAddr,
+    this.kaptAddr = '',
     required this.lat,
     required this.lng,
-    this.roadAddr = '',
-    this.totalHouseholds = 0,
-    this.dongCount = 0,
-    this.minFloor = 0,
-    this.maxFloor = 0,
-    this.approvalDate = '',
-    this.totalParkingCount = 0,
-    this.floorAreaRatio = 0,
-    this.buildingCoverageRatio = 0,
-    this.builder = '',
-    this.heatingType = '',
-    this.managementOffice = '',
-    this.detailLoaded = true,
     this.kakaoName,
+    this.recentPrice = '',
   });
 
-  final String kaptCode;          // 단지코드 (Firestore doc ID / PK)
-  final String kaptName;          // 단지명
-  final String bjdCode;           // 법정동코드 (where 쿼리 인덱스)
-  final String kaptAddr;          // 지번 주소
-  final double lat;               // 위도  (미취득 시 0.0)
-  final double lng;               // 경도  (미취득 시 0.0)
-  final String roadAddr;          // 도로명 주소
-  final int totalHouseholds;      // 세대수
-  final int dongCount;            // 동수
-  final int minFloor;             // 최저층
-  final int maxFloor;             // 최고층
-  final String approvalDate;      // 사용승인일 (YYYY.MM.DD)
-  final int totalParkingCount;    // 총 주차대수
-  final int floorAreaRatio;       // 용적률 (%)
-  final int buildingCoverageRatio;// 건폐율 (%)
-  final String builder;           // 건설사
-  final String heatingType;       // 난방방식
-  final String managementOffice;  // 관리사무소
-  /// false = 좌표만 있고 V4 세부정보(세대수·층수 등)는 아직 미로드.
-  /// 기존 Firestore 데이터는 필드 없음 → default true (하위 호환).
-  final bool detailLoaded;
-  /// 카카오 로컬 API(keyword.json) 검색으로 확인된 장소명 (UI 이름 통일 기준).
+  /// aptCode (법정동코드_지번, 예: "1129013500_1028")
+  /// apartment_trades의 문서 ID와 동일.
+  final String kaptCode;
+
+  /// 국토부 아파트명 (aptName_molit)
+  final String kaptName;
+
+  /// 법정동코드 10자리 (apartments_by_bjd 문서 ID)
+  final String bjdCode;
+
+  /// 지번주소 (미제공 시 공백)
+  final String kaptAddr;
+
+  final double lat;
+  final double lng;
+
+  /// 카카오 지도 아파트명 (kakaoName)
   final String? kakaoName;
 
-  /// 지도에 렌더링 가능한 유효 좌표 여부.
+  /// 최근 거래가 문자열 (예: "9.5억"). Firestore에 적재된 값.
+  final String recentPrice;
+
   bool get hasValidCoords => lat != 0.0 && lng != 0.0;
 
-  /// Firestore DocumentSnapshot → ApartmentInfo.
-  factory ApartmentInfo.fromFirestore(
-    DocumentSnapshot<Map<String, dynamic>> doc,
-  ) {
-    final d = doc.data()!;
-    // approvalDate: YYYYMMDD → YYYY.MM.DD 변환
-    final rawDate = d['approvalDate'] as String? ?? '';
-    final fmtDate = _formatApprovalDate(rawDate);
-
+  /// apartments_by_bjd 배열 항목 → ApartmentInfo
+  factory ApartmentInfo.fromMarkerMap(
+    Map<String, dynamic> m, {
+    required String bjdCode,
+  }) {
     return ApartmentInfo(
-      kaptCode: doc.id,
-      kaptName: d['kaptName'] as String? ?? '',
-      bjdCode: d['bjdCode'] as String? ?? '',
-      kaptAddr: d['kaptAddr'] as String? ?? '',
-      lat: (d['lat'] as num?)?.toDouble() ?? 0.0,
-      lng: (d['lng'] as num?)?.toDouble() ?? 0.0,
-      roadAddr: d['roadAddr'] as String? ?? '',
-      totalHouseholds: (d['totalHouseholds'] as num?)?.toInt() ?? 0,
-      dongCount: (d['dongCount'] as num?)?.toInt() ?? 0,
-      minFloor: (d['minFloor'] as num?)?.toInt() ?? 0,
-      maxFloor: (d['maxFloor'] as num?)?.toInt() ?? 0,
-      approvalDate: fmtDate,
-      totalParkingCount: (d['totalParkingCount'] as num?)?.toInt() ?? 0,
-      floorAreaRatio: (d['floorAreaRatio'] as num?)?.toInt() ?? 0,
-      buildingCoverageRatio: (d['buildingCoverageRatio'] as num?)?.toInt() ?? 0,
-      builder: d['builder'] as String? ?? '',
-      heatingType: d['heatingType'] as String? ?? '',
-      managementOffice: d['managementOffice'] as String? ?? '',
-      // 필드 없으면 기존 데이터로 간주 → 세부정보 완료(true)
-      detailLoaded: d['detailLoaded'] as bool? ?? true,
-      kakaoName: d['kakaoName'] as String?,
+      kaptCode: m['aptCode']?.toString() ?? '',
+      kaptName: m['aptName_molit']?.toString() ?? '',
+      bjdCode: bjdCode,
+      kaptAddr: m['address']?.toString() ?? '',
+      lat: (m['lat'] as num?)?.toDouble() ?? 0.0,
+      lng: (m['lng'] as num?)?.toDouble() ?? 0.0,
+      kakaoName: m['kakaoName'] as String?,
+      recentPrice: m['recentPrice']?.toString() ?? '',
     );
   }
+}
 
-  /// Firestore 저장용 Map.
-  Map<String, dynamic> toFirestore() => {
-    'kaptCode': kaptCode,
-    'kaptName': kaptName,
-    'bjdCode': bjdCode,
-    'kaptAddr': kaptAddr,
-    'lat': lat,
-    'lng': lng,
-    'roadAddr': roadAddr,
-    'totalHouseholds': totalHouseholds,
-    'dongCount': dongCount,
-    'minFloor': minFloor,
-    'maxFloor': maxFloor,
-    'approvalDate': approvalDate,
-    'totalParkingCount': totalParkingCount,
-    'floorAreaRatio': floorAreaRatio,
-    'buildingCoverageRatio': buildingCoverageRatio,
-    'builder': builder,
-    'heatingType': heatingType,
-    'managementOffice': managementOffice,
-    'detailLoaded': detailLoaded,
-    if (kakaoName != null) 'kakaoName': kakaoName,
-    'schemaVersion': _kSchemaVersion,
-    'cachedAt': FieldValue.serverTimestamp(),
-  };
+/// 바텀시트 상세 정보 모델.
+/// apartment_details/{kaptCode} 문서와 대응.
+class ApartmentDetail {
+  const ApartmentDetail({
+    this.complexName = '',
+    this.kakaoName,
+    this.buildYear = 0,
+    this.totalHouseholds = 0,
+    this.parkingPerHousehold = 0.0,
+    this.heatingMethod = '',
+    this.facilities = '',
+    this.busStopDistance = '',
+    this.subwayStation = '',
+    this.highestFloor = 0,
+    this.lowestFloor = 0,
+    this.dongCount = 0,
+    this.address = '',
+    this.roadAddress = '',
+    this.builder = '',
+  });
 
-  /// 복사 생성자 (일부 필드만 업데이트).
-  ApartmentInfo copyWith({
-    double? lat,
-    double? lng,
-    String? roadAddr,
-    int? totalHouseholds,
-    int? dongCount,
-    int? minFloor,
-    int? maxFloor,
-    String? approvalDate,
-    int? totalParkingCount,
-    int? floorAreaRatio,
-    int? buildingCoverageRatio,
-    String? builder,
-    String? heatingType,
-    String? managementOffice,
-    bool? detailLoaded,
-    String? kakaoName,
-  }) =>
-      ApartmentInfo(
-        kaptCode: kaptCode,
-        kaptName: kaptName,
-        bjdCode: bjdCode,
-        kaptAddr: kaptAddr,
-        lat: lat ?? this.lat,
-        lng: lng ?? this.lng,
-        roadAddr: roadAddr ?? this.roadAddr,
-        totalHouseholds: totalHouseholds ?? this.totalHouseholds,
-        dongCount: dongCount ?? this.dongCount,
-        minFloor: minFloor ?? this.minFloor,
-        maxFloor: maxFloor ?? this.maxFloor,
-        approvalDate: approvalDate ?? this.approvalDate,
-        totalParkingCount: totalParkingCount ?? this.totalParkingCount,
-        floorAreaRatio: floorAreaRatio ?? this.floorAreaRatio,
-        buildingCoverageRatio:
-            buildingCoverageRatio ?? this.buildingCoverageRatio,
-        builder: builder ?? this.builder,
-        heatingType: heatingType ?? this.heatingType,
-        managementOffice: managementOffice ?? this.managementOffice,
-        detailLoaded: detailLoaded ?? this.detailLoaded,
-        kakaoName: kakaoName ?? this.kakaoName,
-      );
+  final String complexName;
+  final String? kakaoName;
+  final int buildYear;
+  final int totalHouseholds;
+  final double parkingPerHousehold; // 세대당 주차수
+  final String heatingMethod;
+  final String facilities;
+  final String busStopDistance;
+  final String subwayStation;
+  final int highestFloor;
+  final int lowestFloor;
+  final int dongCount;
+  final String address;    // 지번주소
+  final String roadAddress; // 도로명주소
+  final String builder;
 
-  /// "20040630" → "2004년 06월 30일"
-  static String _formatApprovalDate(String raw) {
-    if (raw.length == 8) {
-      return '${raw.substring(0, 4)}년 ${raw.substring(4, 6)}월 ${raw.substring(6, 8)}일';
-    }
-    return raw;
+  factory ApartmentDetail.fromFirestore(Map<String, dynamic> d) {
+    return ApartmentDetail(
+      complexName: d['complexName']?.toString() ?? '',
+      kakaoName: d['kakaoName'] as String?,
+      buildYear: (d['buildYear'] as num?)?.toInt() ?? 0,
+      totalHouseholds: (d['totalHouseholds'] as num?)?.toInt() ?? 0,
+      parkingPerHousehold:
+          (d['parkingPerHousehold'] as num?)?.toDouble() ?? 0.0,
+      heatingMethod: d['heatingMethod']?.toString() ?? '',
+      facilities: d['facilities']?.toString() ?? '',
+      busStopDistance: d['busStopDistance']?.toString() ?? '',
+      subwayStation: d['subwayStation']?.toString() ?? '',
+      highestFloor: (d['highestFloor'] as num?)?.toInt() ?? 0,
+      lowestFloor: (d['lowestFloor'] as num?)?.toInt() ?? 0,
+      dongCount: (d['dongCount'] as num?)?.toInt() ?? 0,
+      address: d['address']?.toString() ?? '',
+      roadAddress: d['roadAddress']?.toString() ?? '',
+      builder: d['builder']?.toString() ?? '',
+    );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ApartmentRepository — Read-Through Cache
+// ApartmentRepository — Firestore 직접 조회 + 인메모리 캐싱
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Firebase Read-Through Cache 패턴으로 아파트 단지 목록을 제공하는 Repository.
+/// Firestore에 미리 적재된 데이터를 조회하는 Repository.
+///
+/// [Firestore Read 최소화 전략]
+///   1. 인메모리 캐시 (_TimedCache) — TTL 내 동일 키 재조회 시 Firestore 미호출
+///   2. In-flight 중복 방지 — 동일 키에 대한 동시 요청을 하나의 Future로 합산
+///   3. null 결과도 캐시 — 데이터 없는 단지 반복 조회 방지
 class ApartmentRepository {
   ApartmentRepository._();
   static final ApartmentRepository instance = ApartmentRepository._();
 
   final _db = FirebaseFirestore.instance;
 
-  CollectionReference<Map<String, dynamic>> get _col =>
-      _db.collection('apartments');
+  // ── 마커 캐시 ─────────────────────────────────────────────────────────────
+  // TTL 1시간: 사용자가 같은 동네를 스크롤 아웃 후 재진입해도 Firestore 미조회.
+  // 배치 갱신 주기가 1시간보다 짧다면 TTL을 줄이세요.
+  final _markerCache = _TimedCache<List<ApartmentInfo>>(
+    const Duration(hours: 1),
+  );
 
-  // ── Public Entry Point ────────────────────────────────────────────────────
+  // 마커 조회 in-flight: 동일 bjdCode 동시 요청 시 Firestore 1회만 호출.
+  final Map<String, Future<List<ApartmentInfo>>> _markerInflight = {};
 
+  // ── 상세 캐시 ─────────────────────────────────────────────────────────────
+  // TTL 24시간: 단지 스펙(세대수·층수 등)은 하루 단위로도 충분.
+  // null도 캐시하여 데이터 없는 단지 반복 쿼리 방지.
+  final _detailCache = _TimedCache<ApartmentDetail?>(
+    const Duration(hours: 24),
+  );
+
+  // 상세 조회 in-flight: 같은 단지 바텀시트를 빠르게 닫았다 다시 열 때 보호.
+  final Map<String, Future<ApartmentDetail?>> _detailInflight = {};
+
+  // ── 마커 목록 조회: apartments_by_bjd/{bjdCode} ──────────────────────────
+
+  /// 법정동 코드에 해당하는 아파트 마커 목록 반환.
   Future<List<ApartmentInfo>> getApartmentsByBjdCode(String bjdCode) async {
-    debugPrint('[AptRepo] ── Cache check ── bjdCode: $bjdCode');
-    try {
-      final snap = await _col.where('bjdCode', isEqualTo: bjdCode).get();
-
-      if (snap.docs.isNotEmpty) {
-        final firstData = snap.docs.first.data();
-        final cachedAt = firstData['cachedAt'] as Timestamp?;
-        final schemaVersion = (firstData['schemaVersion'] as num?)?.toInt() ?? 1;
-        final isStale = cachedAt == null ||
-            DateTime.now().difference(cachedAt.toDate()).inDays >= 7;
-        final isOldSchema = schemaVersion < _kSchemaVersion;
-
-        if (!isStale && !isOldSchema) {
-          final items =
-              snap.docs.map((d) => ApartmentInfo.fromFirestore(d)).toList();
-          if (items.any((a) => a.hasValidCoords)) {
-            debugPrint('[AptRepo] ✅ Cache HIT — ${items.length}개 단지');
-            // 백그라운드에서 공공 API 단지 수 비교 → 새 단지 있으면 자동 보강
-            _checkAndRefreshIfNewUnits(bjdCode, items.length);
-            return items;
-          }
-          debugPrint('[AptRepo] ⚠️ Cache 유효하나 좌표 없음 — 재호출');
-        } else if (isOldSchema) {
-          debugPrint('[AptRepo] ⚠️ 구 스키마(v$schemaVersion) — 재호출');
-        } else {
-          debugPrint('[AptRepo] ⚠️ Cache STALE — TTL 초과, 재호출');
-        }
-      }
-    } catch (e) {
-      debugPrint('[AptRepo] Firestore 읽기 오류 (Cache Miss 처리): $e');
+    // 1. 메모리 캐시 확인
+    final cached = _markerCache.read(bjdCode);
+    if (cached != null) {
+      debugPrint('[AptRepo] 캐시 HIT — bjdCode: $bjdCode (${cached.length}개)');
+      return cached;
     }
 
-    debugPrint('[AptRepo] ❌ Cache MISS — 공공 API 호출 시작');
-    final List<ApartmentInfo> rawList;
-    try {
-      rawList = await _fetchAptListFromPublicApi(bjdCode);
-    } catch (e) {
-      debugPrint('[AptRepo] 공공 API 호출 실패: $e');
-      return [];
-    }
-
-    if (rawList.isEmpty) {
-      debugPrint('[AptRepo] 공공 API 결과 없음 — bjdCode: $bjdCode');
-      return [];
-    }
-
-    // ── Phase 1: 카카오 좌표만 빠르게 보강 → 즉시 반환 (마커 표시용) ──────────
-    debugPrint('[AptRepo] Phase1: 좌표 보강 시작 — ${rawList.length}개 단지');
-    final withCoords = <ApartmentInfo>[];
-    const coordChunkSize = 8; // 좌표는 상세보다 가벼우므로 더 큰 청크
-    const coordDelay = Duration(milliseconds: 200);
-
-    for (var i = 0; i < rawList.length; i += coordChunkSize) {
-      final chunk = rawList.sublist(i, min(i + coordChunkSize, rawList.length));
-      final result = await Future.wait(
-        chunk.map((apt) => _enrichWithKakaoCoords(apt)),
-      );
-      // detailLoaded=false: 세부정보는 아직 미로드
-      withCoords.addAll(result.map((a) => a.copyWith(detailLoaded: false)));
-      if (i + coordChunkSize < rawList.length) {
-        await Future.delayed(coordDelay);
-      }
-    }
-
-    debugPrint(
-      '[AptRepo] Phase1 완료 — 좌표: ${withCoords.where((a) => a.hasValidCoords).length}개',
-    );
-
-    // 좌표만 있는 상태로 Firestore에 저장 (마커용 캐시)
-    try {
-      await _batchSave(withCoords);
-      debugPrint('[AptRepo] 좌표 캐시 저장 완료 — ${withCoords.length}개');
-    } catch (e) {
-      debugPrint('[AptRepo] 좌표 캐시 저장 실패: $e');
-    }
-
-    // ── Phase 2: V4 세부정보 백그라운드 보강 (마커 표시를 블로킹하지 않음) ──
-    _enrichWithDetailAndSave(withCoords);
-
-    return withCoords;
-  }
-
-  // ── Public: 단지 세부정보 on-demand 로드 (바텀시트 열릴 때 호출) ──────────
-  /// [detailLoaded] = false 인 단지의 V4 정보를 가져와 Firestore 업데이트 후 반환.
-  /// 이미 detailLoaded = true 이면 [apt]를 그대로 반환.
-  Future<ApartmentInfo> getApartmentDetail(ApartmentInfo apt) async {
-    if (apt.detailLoaded) return apt;
-    debugPrint('[AptRepo] On-demand 세부정보 로드 — ${apt.kaptName}');
-    final detail = await _fetchAptDetail(apt.kaptCode);
-    final updated = apt.copyWith(
-      roadAddr: detail['roadAddr'] as String?,
-      totalHouseholds: detail['totalHouseholds'] as int?,
-      dongCount: detail['dongCount'] as int?,
-      minFloor: detail['minFloor'] as int?,
-      maxFloor: detail['maxFloor'] as int?,
-      approvalDate: detail['approvalDate'] as String?,
-      totalParkingCount: detail['totalParkingCount'] as int?,
-      floorAreaRatio: detail['floorAreaRatio'] as int?,
-      buildingCoverageRatio: detail['buildingCoverageRatio'] as int?,
-      builder: detail['builder'] as String?,
-      heatingType: detail['heatingType'] as String?,
-      managementOffice: detail['managementOffice'] as String?,
-      detailLoaded: true,
-    );
-    try {
-      await _col.doc(apt.kaptCode).set(updated.toFirestore());
-    } catch (e) {
-      debugPrint('[AptRepo] 세부정보 Firestore 업데이트 실패: $e');
-    }
-    return updated;
-  }
-
-  // ── Private: V4 세부정보 백그라운드 보강 + Firestore 업데이트 ──────────────
-  Future<void> _enrichWithDetailAndSave(List<ApartmentInfo> apts) async {
-    debugPrint('[AptRepo] Phase2(BG): V4 세부정보 보강 시작 — ${apts.length}개');
-    const chunkSize = 5;
-    const chunkDelay = Duration(milliseconds: 500);
-    final enriched = <ApartmentInfo>[];
-
-    for (var i = 0; i < apts.length; i += chunkSize) {
-      final chunk = apts.sublist(i, min(i + chunkSize, apts.length));
-      final result = await Future.wait(
-        chunk.map((apt) async {
-          final detail = await _fetchAptDetail(apt.kaptCode);
-          return apt.copyWith(
-            roadAddr: detail['roadAddr'] as String?,
-            totalHouseholds: detail['totalHouseholds'] as int?,
-            dongCount: detail['dongCount'] as int?,
-            minFloor: detail['minFloor'] as int?,
-            maxFloor: detail['maxFloor'] as int?,
-            approvalDate: detail['approvalDate'] as String?,
-            totalParkingCount: detail['totalParkingCount'] as int?,
-            floorAreaRatio: detail['floorAreaRatio'] as int?,
-            buildingCoverageRatio: detail['buildingCoverageRatio'] as int?,
-            builder: detail['builder'] as String?,
-            heatingType: detail['heatingType'] as String?,
-            managementOffice: detail['managementOffice'] as String?,
-            detailLoaded: true,
-          );
-        }),
-      );
-      enriched.addAll(result);
-      if (i + chunkSize < apts.length) {
-        await Future.delayed(chunkDelay);
-      }
-    }
-
-    try {
-      await _batchSave(enriched);
-      debugPrint(
-        '[AptRepo] Phase2(BG) 완료 — '
-        '세대수 있음: ${enriched.where((a) => a.totalHouseholds > 0).length}개',
-      );
-    } catch (e) {
-      debugPrint('[AptRepo] Phase2 Firestore 저장 실패: $e');
-    }
-  }
-
-  // ── Private: 공공 API 단지 목록 ───────────────────────────────────────────
-
-  Future<List<ApartmentInfo>> _fetchAptListFromPublicApi(String bjdCode) async {
-    final serviceKey = dotenv.env['PUBLIC_DATA_KEY'];
-    if (serviceKey == null || serviceKey.isEmpty) {
-      throw Exception('[AptRepo] PUBLIC_DATA_KEY가 .env에 설정되지 않았습니다.');
-    }
-
-    const pageSize = 100;
-    final result = <ApartmentInfo>[];
-    int pageNo = 1;
-    int totalCount = 1;
-
-    while (result.length < totalCount) {
-      final url =
-          '$_kAptListBaseUrl'
-          '?serviceKey=$serviceKey'
-          '&bjdCode=$bjdCode'
-          '&numOfRows=$pageSize'
-          '&pageNo=$pageNo';
-
-      debugPrint('[AptRepo] 공공API 요청 — page $pageNo');
-      final res = await http
-          .get(Uri.parse(url))
-          .timeout(const Duration(seconds: 15));
-
-      if (res.statusCode != 200) {
-        throw Exception('[AptRepo] 공공API HTTP ${res.statusCode}');
-      }
-
-      final bodyStr = utf8.decode(res.bodyBytes);
-      final Map<String, dynamic> json;
+    // 2. In-flight 합산: 동일 bjdCode 요청이 이미 진행 중이면 그 Future 반환
+    return _markerInflight.putIfAbsent(bjdCode, () async {
+      debugPrint('[AptRepo] Firestore 마커 조회 — bjdCode: $bjdCode');
       try {
-        json = jsonDecode(bodyStr) as Map<String, dynamic>;
+        final doc = await _db
+            .collection('apartments_by_bjd')
+            .doc(bjdCode)
+            .get();
+
+        List<ApartmentInfo> result = [];
+
+        if (doc.exists) {
+          final data = doc.data()!;
+          final rawList = data['apartments'];
+          if (rawList is List) {
+            result = rawList
+                .whereType<Map<String, dynamic>>()
+                .map((m) => ApartmentInfo.fromMarkerMap(m, bjdCode: bjdCode))
+                .where((a) => a.hasValidCoords && a.kaptCode.isNotEmpty)
+                .toList();
+          }
+        }
+
+        debugPrint('[AptRepo] ✅ ${result.length}개 단지 — bjdCode: $bjdCode');
+        _markerCache.write(bjdCode, result);
+        return result;
       } catch (e) {
-        throw Exception('[AptRepo] JSON 파싱 실패: $e');
+        debugPrint('[AptRepo] 마커 조회 오류: $e');
+        return [];
+      } finally {
+        // 완료 후 in-flight에서 제거
+        _markerInflight.remove(bjdCode);
       }
-
-      final response = json['response'] as Map<String, dynamic>?;
-      final header = response?['header'] as Map<String, dynamic>?;
-      final body = response?['body'] as Map<String, dynamic>?;
-
-      final code = header?['resultCode']?.toString();
-      if (code != null && code != '00' && code != '000') {
-        final msg = header?['resultMsg']?.toString() ?? '';
-        throw Exception('[AptRepo] 공공API 오류 ($code): $msg');
-      }
-
-      if (pageNo == 1) {
-        totalCount = (body?['totalCount'] as num?)?.toInt() ?? 0;
-        debugPrint('[AptRepo] totalCount = $totalCount');
-        if (totalCount == 0) break;
-      }
-
-      final rawItems = body?['items'];
-      final items = (rawItems is List) ? rawItems : <dynamic>[];
-
-      for (final el in items) {
-        if (el is! Map<String, dynamic>) continue;
-        final kaptCode = el['kaptCode']?.toString() ?? '';
-        if (kaptCode.isEmpty) continue;
-
-        final as1 = el['as1']?.toString() ?? '';
-        final as2 = el['as2']?.toString() ?? '';
-        final as3 = el['as3']?.toString() ?? '';
-        final kaptName = el['kaptName']?.toString() ?? '';
-        final addr = [as1, as2, as3].where((s) => s.isNotEmpty).join(' ');
-
-        result.add(
-          ApartmentInfo(
-            kaptCode: kaptCode,
-            kaptName: kaptName,
-            bjdCode: bjdCode,
-            kaptAddr: addr.isNotEmpty ? addr : kaptName,
-            lat: 0.0,
-            lng: 0.0,
-          ),
-        );
-      }
-
-      if (items.isEmpty || result.length >= totalCount) break;
-      pageNo++;
-    }
-
-    debugPrint('[AptRepo] 공공API 파싱 완료 — ${result.length}개 단지');
-    return result;
+    });
   }
 
-  // ── Private: 단지 상세정보 API (V4) ─────────────────────────────────────
+  // ── 상세 정보 조회: apartment_details ────────────────────────────────────
 
-  /// `AptBasisInfoServiceV4` (기본정보 + 상세정보) 병렬 호출 → 단지 상세 반환.
-  /// 실패 시 빈 Map 반환.
-  Future<Map<String, dynamic>> _fetchAptDetail(String kaptCode) async {
-    try {
-      final serviceKey = dotenv.env['PUBLIC_DATA_KEY'];
-      if (serviceKey == null || serviceKey.isEmpty) return {};
+  /// aptCode에 해당하는 단지 상세정보 반환.
+  ///
+  /// 조회 전략:
+  ///   1차: apartment_details.where('aptCode', isEqualTo: aptCode)
+  ///   2차 fallback: .where('lat').where('lng') 좌표 매칭
+  Future<ApartmentDetail?> getApartmentDetail(
+    String aptCode, {
+    double? lat,
+    double? lng,
+  }) async {
+    if (aptCode.isEmpty) return null;
 
-      final bassUrl =
-          '$_kAptBassInfoUrl?serviceKey=$serviceKey&kaptCode=$kaptCode&numOfRows=1&pageNo=1';
-      final dtlUrl =
-          '$_kAptDtlInfoUrl?serviceKey=$serviceKey&kaptCode=$kaptCode&numOfRows=1&pageNo=1';
+    // 1. 메모리 캐시 확인 (null도 캐시됨 → has() 로 판별)
+    if (_detailCache.has(aptCode)) {
+      debugPrint('[AptRepo] 상세 캐시 HIT — $aptCode');
+      return _detailCache.read(aptCode);
+    }
 
-      // 기본정보 + 상세정보 병렬 요청
-      final responses = await Future.wait([
-        http.get(Uri.parse(bassUrl)).timeout(const Duration(seconds: 10)),
-        http.get(Uri.parse(dtlUrl)).timeout(const Duration(seconds: 10)),
-      ]);
+    // 2. In-flight 합산
+    return _detailInflight.putIfAbsent(aptCode, () async {
+      debugPrint('[AptRepo] Firestore 상세정보 조회 — aptCode: $aptCode');
+      try {
+        ApartmentDetail? result;
 
-      Map<String, dynamic> parseItem(http.Response res) {
-        if (res.statusCode != 200) return {};
-        try {
-          final j = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
-          final item = j['response']?['body']?['item'];
-          return item is Map<String, dynamic> ? item : {};
-        } catch (_) {
-          return {};
+        // 1차: aptCode 필드 쿼리
+        final snap = await _db
+            .collection('apartment_details')
+            .where('aptCode', isEqualTo: aptCode)
+            .limit(1)
+            .get();
+
+        if (snap.docs.isNotEmpty) {
+          debugPrint('[AptRepo] 상세정보 ✅ aptCode 매칭');
+          result = ApartmentDetail.fromFirestore(snap.docs.first.data());
+        } else if (lat != null && lng != null && lat != 0.0 && lng != 0.0) {
+          // 2차 fallback: 좌표 쿼리
+          final snapCoord = await _db
+              .collection('apartment_details')
+              .where('lat', isEqualTo: lat)
+              .where('lng', isEqualTo: lng)
+              .limit(1)
+              .get();
+
+          if (snapCoord.docs.isNotEmpty) {
+            debugPrint('[AptRepo] 상세정보 ✅ 좌표 매칭');
+            result = ApartmentDetail.fromFirestore(snapCoord.docs.first.data());
+          }
         }
-      }
 
-      final bass = parseItem(responses[0]);
-      final dtl  = parseItem(responses[1]);
-
-      // JSON 필드를 타입 안전하게 파싱 (API가 숫자를 String으로 반환하는 경우 대응)
-      int numOf(Map<String, dynamic> m, String key) {
-        final v = m[key];
-        if (v == null) return 0;
-        if (v is num) return v.toInt();
-        return int.tryParse(v.toString()) ?? 0;
-      }
-
-      // 주차대수: 지상 + 지하 합산
-      final totalParking = numOf(dtl, 'kaptdPcnt') + numOf(dtl, 'kaptdPcntu');
-
-      final result = <String, dynamic>{
-        'roadAddr':          bass['doroJuso']?.toString() ?? '',
-        'totalHouseholds':   numOf(bass, 'kaptdaCnt'),
-        'dongCount':         numOf(bass, 'kaptDongCnt'),
-        'minFloor':          numOf(bass, 'kaptBaseFloor'),
-        'maxFloor':          numOf(bass, 'kaptTopFloor'),
-        'approvalDate':      bass['kaptUsedate']?.toString() ?? '', // YYYYMMDD
-        'totalParkingCount': totalParking,
-        'floorAreaRatio':    0, // V4 API 미제공
-        'buildingCoverageRatio': 0, // V4 API 미제공
-        'builder':           bass['kaptBcompany']?.toString() ?? '',
-        'heatingType':       bass['codeHeatNm']?.toString() ?? '',
-        'managementOffice':  bass['kaptTel']?.toString() ?? '',
-      };
-
-      if ((result['totalHouseholds'] as int) > 0) {
-        debugPrint(
-          '[AptRepo] 상세정보 ✓ $kaptCode: '
-          '${result['totalHouseholds']}세대, '
-          '${result['minFloor']}~${result['maxFloor']}층, '
-          '주차 $totalParking대',
-        );
-      }
-      return result;
-    } catch (e) {
-      debugPrint('[AptRepo] 상세정보 호출 실패 ($kaptCode): $e');
-      return {};
-    }
-  }
-
-  // ── Private: 카카오 좌표 보강 ─────────────────────────────────────────────
-
-  Future<ApartmentInfo> _enrichWithKakaoCoords(ApartmentInfo apt) async {
-    try {
-      final kakaoKey = dotenv.env['KAKAO_REST_API_KEY'];
-      if (kakaoKey == null || kakaoKey.isEmpty) return apt;
-
-      // 공공 API가 "아파트 관리사무소"로 오등록한 경우 suffix 제거 후 순수 단지명 추출
-      final cleanName = _cleanKaptName(apt.kaptName);
-
-      // 4단계 fallback:
-      //   (1) 정제된 단지명 + 주소 (주요 경로)
-      //   (2) 정제된 단지명만          (주소 매핑 실패 시)
-      //   (3) 원본 단지명만            (정제가 오히려 손실인 경우)
-      //   (4) 주소만                   (단지명으로 찾기 어려울 때)
-      final queries = [
-        '$cleanName ${apt.kaptAddr}'.trim(),
-        cleanName,
-        apt.kaptName.trim(),
-        apt.kaptAddr.trim(),
-      ];
-
-      for (final q in queries) {
-        if (q.isEmpty) continue;
-        final uri = Uri.parse(
-          '$_kKakaoSearchUrl?query=${Uri.encodeComponent(q)}&size=1',
-        );
-        final res = await http
-            .get(uri, headers: {'Authorization': 'KakaoAK $kakaoKey'})
-            .timeout(const Duration(seconds: 10));
-        if (res.statusCode != 200) continue;
-
-        final docs =
-            (jsonDecode(res.body) as Map<String, dynamic>)['documents']
-                as List<dynamic>;
-        if (docs.isEmpty) continue;
-
-        final first = docs.first as Map<String, dynamic>;
-        final lat = double.tryParse(first['y'] as String? ?? '') ?? 0.0;
-        final lng = double.tryParse(first['x'] as String? ?? '') ?? 0.0;
-        if (lat == 0.0 || lng == 0.0) continue;
-
-        final kakaoPlaceName = first['place_name'] as String?;
-
-        if (q != '$cleanName ${apt.kaptAddr}'.trim()) {
-          debugPrint('[AptRepo] 카카오 fallback 성공 (${apt.kaptName}): "$q"');
+        if (result == null) {
+          debugPrint('[AptRepo] 상세정보 없음 — $aptCode (null 캐시 저장)');
         }
-        return apt.copyWith(
-          lat: lat,
-          lng: lng,
-          kakaoName: kakaoPlaceName?.isNotEmpty == true ? kakaoPlaceName : null,
-        );
+
+        // null도 캐시 저장 → 동일 aptCode 반복 쿼리 방지
+        _detailCache.write(aptCode, result);
+        return result;
+      } catch (e) {
+        debugPrint('[AptRepo] 상세정보 조회 오류: $e');
+        // 오류 시 캐시하지 않음 → 다음 탭 시 재시도 가능
+        return null;
+      } finally {
+        _detailInflight.remove(aptCode);
       }
-
-      debugPrint('[AptRepo] 카카오 좌표 없음 — 4단계 검색 모두 실패 (${apt.kaptName})');
-      return apt;
-    } catch (e) {
-      debugPrint('[AptRepo] 카카오 좌표 보강 실패 (${apt.kaptName}): $e');
-      return apt;
-    }
-  }
-
-  // ── 백그라운드 신규 단지 감지 — 캐시 HIT 시에도 공공 API 단지 수 비교 ─────────
-  /// 캐시 단지 수보다 공공 API 단지 수가 많으면 차분만 보강해 Firestore 업데이트.
-  Future<void> _checkAndRefreshIfNewUnits(
-    String bjdCode,
-    int cachedCount,
-  ) async {
-    try {
-      final fresh = await _fetchAptListFromPublicApi(bjdCode);
-      if (fresh.length <= cachedCount) return; // 신규 단지 없음
-
-      debugPrint(
-        '[AptRepo] 신규 단지 감지 — 캐시: $cachedCount개 → API: ${fresh.length}개',
-      );
-
-      // 이미 Firestore에 있는 kaptCode 목록
-      final snap = await _col.where('bjdCode', isEqualTo: bjdCode).get();
-      final existing = snap.docs.map((d) => d.id).toSet();
-
-      // 신규 단지만 추출
-      final newApts = fresh.where((a) => !existing.contains(a.kaptCode)).toList();
-      if (newApts.isEmpty) return;
-
-      debugPrint('[AptRepo] 신규 단지 ${newApts.length}개 좌표 보강 시작');
-
-      final withCoords = <ApartmentInfo>[];
-      for (var i = 0; i < newApts.length; i += 8) {
-        final chunk = newApts.sublist(i, min(i + 8, newApts.length));
-        final result = await Future.wait(
-          chunk.map((a) => _enrichWithKakaoCoords(a)),
-        );
-        withCoords.addAll(result.map((a) => a.copyWith(detailLoaded: false)));
-        if (i + 8 < newApts.length) {
-          await Future.delayed(const Duration(milliseconds: 200));
-        }
-      }
-
-      await _batchSave(withCoords);
-      _enrichWithDetailAndSave(withCoords);
-      debugPrint('[AptRepo] 신규 단지 보강 완료 — ${withCoords.length}개 저장');
-    } catch (e) {
-      debugPrint('[AptRepo] _checkAndRefreshIfNewUnits 오류: $e');
-    }
-  }
-
-  // ── Private: Firestore WriteBatch 저장 ───────────────────────────────────
-
-  Future<void> _batchSave(List<ApartmentInfo> apts) async {
-    if (apts.isEmpty) return;
-
-    const chunkSize = 400;
-    for (var i = 0; i < apts.length; i += chunkSize) {
-      final end = (i + chunkSize).clamp(0, apts.length);
-      final chunk = apts.sublist(i, end);
-
-      final batch = _db.batch();
-      for (final apt in chunk) {
-        batch.set(_col.doc(apt.kaptCode), apt.toFirestore());
-      }
-      await batch.commit();
-      debugPrint(
-        '[AptRepo] Batch ${i ~/ chunkSize + 1} 커밋 완료 — ${chunk.length}개',
-      );
-    }
+    });
   }
 }

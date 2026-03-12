@@ -16,71 +16,6 @@ const KAKAO_API_KEY = "58af62d9bd084e0ba7c2fa105414160c";
 // ⏳ 과부하 방지를 위한 딜레이 함수 (밀리초 단위)
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function runBatch() {
-  console.log("🚀 전국 아파트 데이터 수집 배치 작업 시작...");
-  
-  // 🔥 대한민국 전국 시군구(법정동 5자리) 코드 약 250개
-  const allLawdCodes = [
-    // 서울
-    "11110","11140","11170","11200","11215","11230","11260","11290","11305","11320","11350","11380","11410","11440","11470","11500","11530","11545","11560","11590","11620","11650","11680","11710","11740",
-    // 부산
-    "26110","26140","26170","26200","26230","26260","26290","26320","26350","26380","26410","26440","26470","26500","26530","26710",
-    // 대구
-    "27110","27140","27170","27200","27230","27260","27290","27710",
-    // 인천
-    "28110","28140","28170","28177","28185","28200","28237","28245","28260","28710","28720",
-    // 광주, 대전, 울산, 세종
-    "29110","29140","29155","29170","29200","30110","30140","30170","30200","30230","31110","31140","31170","31200","31710","36110",
-    // 경기
-    "41111","41113","41115","41117","41131","41133","41135","41150","41171","41173","41190","41210","41220","41250","41271","41273","41281","41285","41287","41290","41310","41360","41370","41390","41410","41430","41450","41461","41463","41465","41480","41500","41550","41570","41590","41610","41630","41650","41670","41800","41820","41830",
-    // 강원
-    "42110","42130","42150","42170","42190","42210","42230","42720","42730","42750","42760","42770","42780","42790","42800","42810","42820","42830",
-    // 충북, 충남
-    "43111","43112","43113","43114","43130","43150","43720","43730","43740","43745","43750","43760","43770","43800","44131","44133","44150","44180","44200","44210","44230","44250","44270","44710","44730","44760","44770","44790","44800","44810","44825",
-    // 전북, 전남
-    "45111","45113","45130","45140","45180","45210","45710","45720","45730","45740","45750","45770","45790","45800","46110","46130","46150","46170","46230","46710","46720","46730","46770","46780","46790","46800","46810","46820","46830","46840","46860","46870","46880","46890","46900","46910",
-    // 경북, 경남
-    "47111","47113","47130","47150","47170","47190","47210","47230","47250","47280","47290","47720","47730","47750","47760","47770","47820","47830","47840","47850","47900","47920","47930","47940","48121","48123","48125","48127","48129","48170","48220","48240","48250","48270","48310","48330","48720","48730","48740","48820","48840","48850","48860","48870","48880","48890",
-    // 제주
-    "50110","50130"
-  ];
-  
-  // 이번 달 데이터를 돌리려면 아래 코드를 씁니다. 
-  // (하지만 현재 2월 데이터가 풍부하므로 당분간 202602로 고정해서 테스트하는 것을 추천합니다!)
-  const dealYmd = '202602';
-
-  let count = 1;
-  for (const lawdCd of allLawdCodes) {
-    console.log(`📍 [${count}/${allLawdCodes.length}] 지역코드 [${lawdCd}] 처리 중...`);
-    await processRegion(lawdCd, dealYmd);
-    
-    // 💡 핵심: 카카오/국토부 서버 차단 방지를 위해 지역과 지역 사이에 1.5초 대기
-    await delay(1500); 
-    count++;
-  }
-  
-  console.log("✅ 전국 데이터 배치 작업이 완벽하게 완료되었습니다!");
-}
-
-exports.updateApartmentData = onSchedule(
-  { schedule: "0 2 * * *", timeZone: "Asia/Seoul", timeoutSeconds: 3600, memory: "1GiB" },
-  async (event) => { try { await runBatch(); } catch (e) { console.error(e); } }
-);
-
-exports.testUpdateData = onRequest(
-  { timeoutSeconds: 3600, memory: "1GiB" },
-  async (req, res) => {
-    try {
-      // ⚠️ 웹 브라우저는 접속 후 2분 정도 지나면 응답이 없어서 연결을 끊어버립니다.
-      // 하지만 서버 백그라운드에서는 1시간 동안 계속 돌고 있으니 터미널(Vscode) 로그를 확인하세요!
-      res.send("<h1>✅ 전국 데이터 수집 시작! 처리 시간(약 10~20분)이 걸리므로 터미널(Vscode) 로그를 확인하세요.</h1>");
-      await runBatch();
-    } catch (error) {
-      console.error(error);
-    }
-  }
-);
-
 async function processRegion(lawdCd, dealYmd) {
   const molitUrl = `http://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade?serviceKey=${MOLIT_API_KEY}&LAWD_CD=${lawdCd}&DEAL_YMD=${dealYmd}&numOfRows=1000`;
   
@@ -249,7 +184,7 @@ async function getKakaoLocation(address, aptNm) {
 
 // 웹 브라우저 접속 시, 응답은 바로 보내고 서버 백그라운드에서 자동 수집을 시작합니다.
 exports.testTotalDetails = onRequest(
-  { timeoutSeconds: 3600, memory: "1GiB" },
+  { timeoutSeconds: 1800, memory: "1GiB" },
   async (req, res) => {
     try {
       res.send(`<h1>✅ 11페이지부터 마스터 데이터 자동 수집 시작! 터미널(Vscode) 로그를 확인하세요.</h1>`);
@@ -418,54 +353,39 @@ async function runTotalDetailBatch(pageNo) {
 
 
 // ============================================================================
-// 🌟 [3단계] 10년 치 평형별 실거래가 과거 데이터 수집 (Backfill 배치)
+// 🌟 [통합 3단계] 10년 치 실거래가 수집 & 지도 마커 최신가 동시 업데이트!
 // ============================================================================
 
-// 카카오 API를 대체할 인메모리(In-memory) 법정동 캐시
-let bjdCache = null;
+// 카카오 API를 대체할 인메모리(In-memory) 법정동 캐시 (마커 데이터 통째로 보관)
+let bjdDocCache = null;
 
 async function loadBjdCache() {
-    if (bjdCache) return;
-    bjdCache = new Map();
+    if (bjdDocCache) return;
+    bjdDocCache = new Map();
     const bjdSnapshot = await db.collection("apartments_by_bjd").get();
     
     for (const doc of bjdSnapshot.docs) {
         const data = doc.data();
-        const bjdCode = data.bjdCode;
-        const lawdCd = bjdCode.substring(0, 5); // 11290
-        const umdNm = data.bjdName.split(' ').pop(); // "서울특별시 성북구 종암동" -> "종암동"
+        const bjdCode = doc.id;
+        const lawdCd = bjdCode.substring(0, 5); 
+        const umdNm = data.bjdName.split(' ').pop(); 
         
-        // 키: "11290_종암동", 값: "1129013500"
-        bjdCache.set(`${lawdCd}_${umdNm}`, bjdCode);
+        bjdDocCache.set(`${lawdCd}_${umdNm}`, {
+            bjdCode: bjdCode,
+            data: data, // 마커 배열(apartments)이 포함된 전체 데이터
+            isModified: false // 이번 달 거래로 '최신 가격'이 갱신되었는지 체크
+        });
     }
-    console.log(`✅ 법정동 로컬 캐시 로드 완료: ${bjdCache.size}개 동 매핑 (카카오 API 호출 생략)`);
+    console.log(`✅ 법정동 로컬 캐시 로드 완료: ${bjdDocCache.size}개 동 매핑 (마커 연동 완료)`);
 }
 
-// 웹 브라우저에서 ?ymd=201601 형태로 접속하여 특정 달의 전국 실거래가를 수집합니다.
-exports.testBackfillTrades = onRequest(
-  { timeoutSeconds: 3600, memory: "1GiB" },
-  async (req, res) => {
-    try {
-      const ymd = req.query.ymd; // 예: "201601"
-      
-      if (!ymd || ymd.length !== 6) {
-          res.send("<h1>❌ 에러: ?ymd=YYYYMM 형식으로 파라미터를 입력하세요 (예: ?ymd=201601)</h1>");
-          return;
-      }
-      
-      res.send(`<h1>✅ ${ymd}월 전국 실거래가 백필 수집 시작! Vscode 터미널을 확인하세요.</h1>`);
-      await runBackfillBatch(ymd);
-    } catch (error) {
-      console.error(error);
-    }
-  }
-);
+// (testBackfillTrades 함수는 그대로 두시면 됩니다!)
 
 async function runBackfillBatch(ymd) {
-    console.log(`🚀 [실거래가 백필] ${ymd}월 전국 데이터 수집 시작...`);
+    console.log(`🚀 [통합 실거래가] ${ymd}월 전국 데이터 수집 (차트 & 마커 동시 병합)...`);
     await loadBjdCache();
 
-    // 전국 시군구 코드 배열 (기존 코드에서 복사해서 씁니다)
+    // 전국 시군구 코드 250개
     const allLawdCodes = [
         "11110","11140","11170","11200","11215","11230","11260","11290","11305","11320","11350","11380","11410","11440","11470","11500","11530","11545","11560","11590","11620","11650","11680","11710","11740",
         "26110","26140","26170","26200","26230","26260","26290","26320","26350","26380","26410","26440","26470","26500","26530","26710","27110","27140","27170","27200","27230","27260","27290","27710","28110","28140","28170","28177","28185","28200","28237","28245","28260","28710","28720","29110","29140","29155","29170","29200","30110","30140","30170","30200","30230","31110","31140","31170","31200","31710","36110","41111","41113","41115","41117","41131","41133","41135","41150","41171","41173","41190","41210","41220","41250","41271","41273","41281","41285","41287","41290","41310","41360","41370","41390","41410","41430","41450","41461","41463","41465","41480","41500","41550","41570","41590","41610","41630","41650","41670","41800","41820","41830","42110","42130","42150","42170","42190","42210","42230","42720","42730","42750","42760","42770","42780","42790","42800","42810","42820","42830","43111","43112","43113","43114","43130","43150","43720","43730","43740","43745","43750","43760","43770","43800","44131","44133","44150","44180","44200","44210","44230","44250","44270","44710","44730","44760","44770","44790","44800","44810","44825","45111","45113","45130","45140","45180","45210","45710","45720","45730","45740","45750","45770","45790","45800","46110","46130","46150","46170","46230","46710","46720","46730","46770","46780","46790","46800","46810","46820","46830","46840","46860","46870","46880","46890","46900","46910","47111","47113","47130","47150","47170","47190","47210","47230","47250","47280","47290","47720","47730","47750","47760","47770","47820","47830","47840","47850","47900","47920","47930","47940","48121","48123","48125","48127","48129","48170","48220","48240","48250","48270","48310","48330","48720","48730","48740","48820","48840","48850","48860","48870","48880","48890","50110","50130"
@@ -473,8 +393,6 @@ async function runBackfillBatch(ymd) {
 
     for (let i = 0; i < allLawdCodes.length; i++) {
         const lawdCd = allLawdCodes[i];
-        
-        // numOfRows를 넉넉하게 주어 한 달 치 거래를 한 번에 가져옴
         const molitUrl = `http://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade?serviceKey=${MOLIT_API_KEY}&LAWD_CD=${lawdCd}&DEAL_YMD=${ymd}&numOfRows=10000`;
 
         try {
@@ -488,26 +406,26 @@ async function runBackfillBatch(ymd) {
 
             if (tradeList.length === 0 || !tradeList[0].aptNm) continue;
 
-            // 1. 단지별, 평형별로 거래 데이터 그룹화
             const tradesByApt = new Map();
 
+            // 🔥 1. 데이터 분류 및 마커 최신 가격 업데이트
             for (const trade of tradeList) {
                 if (!trade.aptNm) continue;
                 
                 const umdNm = String(trade.umdNm || "").trim();
                 const jibun = String(trade.jibun || "").trim();
-                const bjdCode = bjdCache.get(`${lawdCd}_${umdNm}`);
+                
+                // 캐시에서 해당 동네 정보 가져오기
+                const cacheItem = bjdDocCache.get(`${lawdCd}_${umdNm}`);
+                if (!cacheItem) continue; 
 
-                if (!bjdCode) continue; 
-
+                const bjdCode = cacheItem.bjdCode;
                 const aptCode = `${bjdCode}_${jibun}`;
                 
-                // 🔥 [핵심 수정] 전용면적을 사람들이 보는 '공급면적 평형'으로 변환합니다!
+                // [차트용 데이터 세팅]
                 const area = parseFloat(trade.excluUseAr || "0");
-                const supplyArea = area * 1.33; // 전용률 75% 가정하여 공급면적 산출
-                const pyeong = Math.round(supplyArea / 3.3058); // 평(坪)으로 변환 후 반올림
-                
-                // Firestore에 저장될 그룹 키 (예: "34평", "24평")
+                const supplyArea = area * 1.33; 
+                const pyeong = Math.round(supplyArea / 3.3058); 
                 const areaKey = `${pyeong}평`; 
                 
                 const priceStr = String(trade.dealAmount || "").trim().replace(/,/g, '');
@@ -516,22 +434,29 @@ async function runBackfillBatch(ymd) {
                 const dealDate = `${trade.dealYear}${String(trade.dealMonth).padStart(2, '0')}${String(trade.dealDay).padStart(2, '0')}`;
 
                 if (!tradesByApt.has(aptCode)) tradesByApt.set(aptCode, {});
-                
                 const aptTrades = tradesByApt.get(aptCode);
                 if (!aptTrades[areaKey]) aptTrades[areaKey] = [];
 
-                // 🌟 전용면적 원본(area)도 함께 저장해두면 앱에서 "34평 (전용 84㎡)" 처럼 친절하게 보여줄 수 있습니다.
-                aptTrades[areaKey].push({ 
-                    date: dealDate, 
-                    price: price, 
-                    floor: floor, 
-                    netArea: area 
-                });
+                aptTrades[areaKey].push({ date: dealDate, price: price, floor: floor, netArea: area });
+
+                // 🌟 [핵심] 지도 마커용 최신 실거래가 동시 업데이트!
+                const aptArray = cacheItem.data.apartments || [];
+                const aptIndex = aptArray.findIndex(a => a.aptCode === aptCode);
+                
+                if (aptIndex !== -1) {
+                    const existingDate = aptArray[aptIndex].recentDealDate || "0";
+                    // 지금 가져온 거래가 기존에 저장된 거래일자보다 최신이거나 같으면 마커 가격 교체!
+                    if (parseInt(dealDate) >= parseInt(existingDate)) {
+                        aptArray[aptIndex].recentPrice = priceStr;
+                        aptArray[aptIndex].recentDealDate = dealDate;
+                        cacheItem.isModified = true; // DB 업데이트 대상(장바구니)에 담기
+                    }
+                }
             }
 
             if (tradesByApt.size === 0) continue;
 
-            // 2. 100개 단위로 끊어서 Firestore에서 기존 데이터 읽어오기 (db.getAll)
+            // 🔥 2. 차트용 데이터(apartment_trades) Firestore 저장
             const aptCodes = Array.from(tradesByApt.keys());
             const chunks = [];
             for (let k = 0; k < aptCodes.length; k += 100) chunks.push(aptCodes.slice(k, k + 100));
@@ -540,30 +465,24 @@ async function runBackfillBatch(ymd) {
 
             for (const chunk of chunks) {
                 const docRefs = chunk.map(code => db.collection("apartment_trades").doc(code));
-                
-                // 🔥 기존 문서들을 한 번에 읽어옵니다! (읽기 비용 최소화)
                 const snapshots = await db.getAll(...docRefs);
                 const batch = db.batch();
 
                 snapshots.forEach((snap, idx) => {
                     const aptCode = chunk[idx];
-                    const newTrades = tradesByApt.get(aptCode); // 이번 달 가져온 새 거래내역
+                    const newTrades = tradesByApt.get(aptCode); 
                     const existingData = snap.exists ? snap.data() : { aptCode: aptCode, tradesByArea: {} };
                     const existingTrades = existingData.tradesByArea || {};
 
-                    // 기존 배열에 새로운 거래내역 병합
                     for (const [areaKey, tradeArr] of Object.entries(newTrades)) {
                         if (!existingTrades[areaKey]) existingTrades[areaKey] = [];
 
-                        // 중복 방지 (같은 날짜에 같은 가격의 거래가 이미 있는지 검사)
                         const existingDates = new Set(existingTrades[areaKey].map(t => t.date + "_" + t.price));
                         for (const t of tradeArr) {
                             if (!existingDates.has(t.date + "_" + t.price)) {
                                 existingTrades[areaKey].push(t);
                             }
                         }
-                        
-                        // 날짜순(과거->최신)으로 정렬 (나중에 앱에서 차트 그리기 좋게!)
                         existingTrades[areaKey].sort((a, b) => parseInt(a.date) - parseInt(b.date));
                     }
 
@@ -579,16 +498,33 @@ async function runBackfillBatch(ymd) {
                 await batch.commit();
             }
 
-            console.log(`✅ [${lawdCd}] ${ymd}월 데이터 ${savedAptCount}개 단지 (총 ${tradeList.length}건) 병합 저장 완료!`);
+            // 🔥 3. 마커 데이터(apartments_by_bjd) Firestore 덮어쓰기
+            const bjdBatch = db.batch();
+            let bjdUpdateCount = 0;
+            
+            // 캐시를 돌면서 가격이 갱신된 동네만 찾아서 한 번에 업데이트!
+            bjdDocCache.forEach((cacheItem) => {
+                if (cacheItem.isModified) {
+                    const docRef = db.collection("apartments_by_bjd").doc(cacheItem.bjdCode);
+                    bjdBatch.update(docRef, { apartments: cacheItem.data.apartments });
+                    cacheItem.isModified = false; // 완료 후 플래그 초기화
+                    bjdUpdateCount++;
+                }
+            });
+
+            if (bjdUpdateCount > 0) {
+                await bjdBatch.commit();
+            }
+
+            console.log(`✅ [${lawdCd}] 차트(${savedAptCount}단지) & 마커(${bjdUpdateCount}개동) 통합 저장 완료!`);
 
         } catch(e) {
             console.error(`❌ [${lawdCd}] 에러:`, e.message);
         }
 
-        await delay(500); // 디도스 방지 0.5초 대기
+        await delay(1500); 
     }
-    console.log(`🎉 ${ymd}월 전국 아파트 실거래가 백필(Backfill) 배치가 완벽하게 끝났습니다!`);
-    console.log(`➡️ 다음 달 데이터를 수집하려면 주소창에 ?ymd=... 로 변경하여 재접속하세요.`);
+    console.log(`🎉 ${ymd}월 실거래가 통합 백필 & 마커 업데이트 배치가 완벽하게 끝났습니다!`);
 }
 
 
@@ -600,7 +536,7 @@ exports.updateDailyTrades = onSchedule(
   { 
     schedule: "0 2 * * *", // 매일 새벽 2시
     timeZone: "Asia/Seoul", 
-    timeoutSeconds: 3600,  // 최대 1시간 허용
+    timeoutSeconds: 1800,  // 최대 1시간 허용
     memory: "1GiB" 
   },
   async (event) => {
