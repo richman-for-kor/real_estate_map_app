@@ -192,6 +192,13 @@ class ApartmentRepository {
   // 상세 조회 in-flight: 같은 단지 바텀시트를 빠르게 닫았다 다시 열 때 보호.
   final Map<String, Future<ApartmentDetail?>> _detailInflight = {};
 
+  // ── 구별 평균가 캐시 ──────────────────────────────────────────────────────
+  // TTL 6시간: 홈 화면 시세 카드용. 배치 갱신이 하루 1~2회이므로 충분.
+  final _districtCache = _TimedCache<({int avgPrice, int count})>(
+    const Duration(hours: 6),
+  );
+  final Map<String, Future<({int avgPrice, int count})>> _districtInflight = {};
+
   // ── 마커 목록 조회: apartments_by_bjd/{bjdCode} ──────────────────────────
 
   /// 법정동 코드에 해당하는 아파트 마커 목록 반환.
@@ -237,6 +244,83 @@ class ApartmentRepository {
         _markerInflight.remove(bjdCode);
       }
     });
+  }
+
+  // ── 구별 평균 매매가 조회: apartments_by_bjd (범위 쿼리) ─────────────────────
+
+  /// lawdCd5(5자리 법정동코드)에 해당하는 구의 아파트 평균 최근 거래가 반환.
+  ///
+  /// 반환값: (avgPrice: 만원 단위 평균, count: 유효 단지 수)
+  /// count == 0 이면 데이터 없음.
+  Future<({int avgPrice, int count})> getDistrictAvgPrice(
+    String lawdCd5,
+  ) async {
+    if (lawdCd5.isEmpty) return (avgPrice: 0, count: 0);
+
+    // 1. 메모리 캐시 확인
+    if (_districtCache.has(lawdCd5)) {
+      final cached = _districtCache.read(lawdCd5)!;
+      debugPrint('[AptRepo] 구별 평균가 캐시 HIT — $lawdCd5 (${cached.count}건)');
+      return cached;
+    }
+
+    // 2. In-flight 합산
+    return _districtInflight.putIfAbsent(lawdCd5, () async {
+      debugPrint('[AptRepo] Firestore 구별 평균가 조회 — lawdCd5: $lawdCd5');
+      try {
+        // 10자리 bjdCode 범위: lawdCd5+'00000' ~ (lawdCd5+1)+'00000'
+        final lower = '${lawdCd5}00000';
+        final upper =
+            '${(int.parse(lawdCd5) + 1).toString().padLeft(5, '0')}00000';
+
+        final snap = await _db
+            .collection('apartments_by_bjd')
+            .where(FieldPath.documentId, isGreaterThanOrEqualTo: lower)
+            .where(FieldPath.documentId, isLessThan: upper)
+            .get();
+
+        int total = 0;
+        int count = 0;
+        for (final doc in snap.docs) {
+          final rawList = doc.data()['apartments'];
+          if (rawList is! List) continue;
+          for (final item in rawList) {
+            if (item is! Map) continue;
+            final priceStr = item['recentPrice']?.toString() ?? '';
+            final parsed = _parseRecentPrice(priceStr);
+            if (parsed > 0) {
+              total += parsed;
+              count++;
+            }
+          }
+        }
+
+        final result = (avgPrice: count > 0 ? total ~/ count : 0, count: count);
+        debugPrint('[AptRepo] ✅ 구별 평균가 — $lawdCd5: ${result.avgPrice}만원 (${result.count}건)');
+        _districtCache.write(lawdCd5, result);
+        return result;
+      } catch (e) {
+        debugPrint('[AptRepo] 구별 평균가 조회 오류: $e');
+        return (avgPrice: 0, count: 0);
+      } finally {
+        _districtInflight.remove(lawdCd5);
+      }
+    });
+  }
+
+  /// "9.5억" / "13억" / "9,000만" 등의 문자열 → 만원 정수.
+  static int _parseRecentPrice(String s) {
+    if (s.isEmpty) return 0;
+    if (s.contains('억')) {
+      final eokStr = s.split('억').first.trim();
+      final eok = double.tryParse(eokStr) ?? 0.0;
+      return (eok * 10000).round();
+    }
+    if (s.contains('만')) {
+      final manStr = s.replaceAll('만', '').replaceAll(',', '').trim();
+      return int.tryParse(manStr) ?? 0;
+    }
+    return 0;
   }
 
   // ── 상세 정보 조회: apartment_details ────────────────────────────────────

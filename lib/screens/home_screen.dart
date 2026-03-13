@@ -10,9 +10,9 @@ import '../main.dart'
         kSurface,
         kTextDark,
         kTextMuted;
+import '../services/apartment_repository.dart';
 import '../services/auth_service.dart';
 import '../services/news_service.dart';
-import '../services/public_data_service.dart';
 import 'favorite_list_screen.dart';
 import 'login_screen.dart';
 import 'news_webview_screen.dart';
@@ -32,15 +32,6 @@ const _kStatRegions = [
   (area: '영등포', lawdCd: '11560', lat: 37.5264, lng: 126.8963),
   (area: '분당구', lawdCd: '41135', lat: 37.3825, lng: 127.1152),
 ];
-
-/// 실거래가 API 조회 연월 문자열 (YYYYMM).
-///
-/// [monthOffset] 0 = 이번 달, -1 = 지난달 (폴백용).
-String _dealYmd({int monthOffset = 0}) {
-  final now = DateTime.now();
-  final target = DateTime(now.year, now.month + monthOffset);
-  return '${target.year}${target.month.toString().padLeft(2, '0')}';
-}
 
 /// 만원 단위 평균가 → "N.M억" 형식 표시 문자열.
 ///
@@ -149,14 +140,9 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
 
-      // 2. 공공데이터 API 호출 — 최근 3개월 병렬 조회
-      final ymds = [
-        _dealYmd(),
-        _dealYmd(monthOffset: -1),
-        _dealYmd(monthOffset: -2),
-      ];
+      // 2. Firestore 구별 평균가 병렬 조회
       final results = await Future.wait(
-        _kStatRegions.map((r) => _fetchRegionStat(r.area, r.lawdCd, ymds)),
+        _kStatRegions.map((r) => _fetchRegionStat(r.area, r.lawdCd)),
       );
 
       // 3. Firestore에 일일 캐시 저장 (실패해도 UI에는 영향 없음)
@@ -175,34 +161,16 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// 단일 지역의 최근 3개월 평균 거래가를 계산합니다.
-  ///
-  /// [ymds]: 조회할 YYYYMM 문자열 목록 (3개월치).
-  /// 월별 최대 100건씩 조회, 전체 유효 거래 기준으로 평균을 계산합니다.
-  Future<_MarketStat> _fetchRegionStat(
-    String area,
-    String lawdCd,
-    List<String> ymds,
-  ) async {
+  /// 단일 지역의 평균 매매가를 Firestore에서 조회합니다.
+  Future<_MarketStat> _fetchRegionStat(String area, String lawdCd) async {
     try {
-      final svc = const PublicDataService();
-      final monthResults = await Future.wait(
-        ymds.map((ymd) => svc.fetchAptTrades(
-              lawdCd: lawdCd,
-              dealYmd: ymd,
-              numOfRows: 100,
-            )),
-      );
-      final valid = monthResults
-          .expand((r) => r.records)
-          .where((r) => r.price > 0)
-          .toList();
-      if (valid.isEmpty) return _MarketStat.error(area);
-      final total = valid.map((r) => r.price).reduce((a, b) => a + b);
+      final result =
+          await ApartmentRepository.instance.getDistrictAvgPrice(lawdCd);
+      if (result.count == 0) return _MarketStat.error(area);
       return _MarketStat(
         area: area,
-        price: _formatAvgPrice(total ~/ valid.length),
-        tradeCount: valid.length,
+        price: _formatAvgPrice(result.avgPrice),
+        tradeCount: result.count,
       );
     } catch (e, st) {
       debugPrint('[HomeScreen] _fetchRegionStat($area) 오류: $e\n$st');

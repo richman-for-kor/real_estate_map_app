@@ -17,6 +17,21 @@ service cloud.firestore {
       allow write: if true;
     }
 
+    // ── 배치 적재 공개 데이터 (읽기 전용) ──────────────────────────────────────
+    // 백엔드 배치가 적재한 비민감 공개 데이터. 앱은 읽기만 수행.
+    match /apartments_by_bjd/{bjdCode} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /apartment_trades/{aptCode} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /apartment_details/{detailId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     // ── 유저 프로필 ────────────────────────────────────────────────────────────
     match /users/{uid} {
       allow read, write: if request.auth != null && request.auth.uid == uid;
@@ -31,6 +46,13 @@ service cloud.firestore {
       // ── 임장노트 house_logs (서브컬렉션) ───────────────────────────────────
       // users/{uid}/house_logs/{buildingId}/records/{recordId}
       match /house_logs/{buildingId}/records/{recordId} {
+        allow read, write, delete: if request.auth != null
+          && request.auth.uid == uid;
+        allow create: if request.auth != null && request.auth.uid == uid;
+      }
+
+      // ── 최근 본 매물 (서브컬렉션) ──────────────────────────────────────────
+      match /recent_views/{viewId} {
         allow read, write, delete: if request.auth != null
           && request.auth.uid == uid;
         allow create: if request.auth != null && request.auth.uid == uid;

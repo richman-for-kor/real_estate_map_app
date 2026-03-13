@@ -31,7 +31,8 @@
       "Bash(npm install:*)",
       "Bash(sleep 30 && flutter logs -d R3CR10ZYHNY 2>&1 | head -200)",
       "WebFetch(domain:apis.data.go.kr)",
-      "WebFetch(domain:dapi.kakao.com)"
+      "WebFetch(domain:dapi.kakao.com)",
+      "Bash(grep -rn \"recent_views\\\\|recentView\" \"C:\\\\workspace\\\\real_estate_map_app\\\\lib\" | grep -v \".dart:.*//.*recent\" | head -20)"
     ]
   }
 }
